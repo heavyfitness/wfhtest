@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import hashlib
 from datetime import date
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from .link_classifier import LinkType, classify_url
 from .utils import slugify, truncate_at_word
+
+SourceTrust = Literal["direct", "aggregator", "unknown"]
 
 SEO_TITLE_MAX = 60
 META_DESCRIPTION_MAX = 155
@@ -27,7 +31,23 @@ class AffiliateLink(BaseModel):
 
 
 class Lead(BaseModel):
-    """A verified (or not) remote-job lead from any source."""
+    """A verified (or not) remote-job lead from any source.
+
+    Two computed fields are derived automatically from ``apply_url``:
+
+    * ``link_type`` -- "direct", "aggregator", or "unknown" as classified by
+      wfh_pipeline.link_classifier.
+    * ``is_direct`` -- True only when link_type == "direct".
+
+    These drive the pledge-enforcement logic in the generator and QC gate.
+    Never set them manually; they will be re-derived from the URL anyway.
+
+    ``source_trust`` is set by the LeadSource that produced the lead
+    ("direct" for ATS feeds, "aggregator" for RSS boards, "unknown" default).
+    It is complementary to ``link_type``: a source can be "aggregator" even
+    when a particular lead's URL happens to be direct (e.g. a WWR listing that
+    links straight to Greenhouse).
+    """
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -41,9 +61,30 @@ class Lead(BaseModel):
     description: str = ""
     apply_url: str
     source: str = "unknown"
+    source_trust: SourceTrust = "unknown"
     date_found: date = Field(default_factory=date.today)
     category: str = "remote-jobs"
     verified: bool = False
+
+    # ------------------------------------------------------------------
+    # Computed fields -- derived from apply_url, never stored in CSV/DB
+    # ------------------------------------------------------------------
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def link_type(self) -> LinkType:
+        """Classify the apply URL as "direct", "aggregator", or "unknown"."""
+        return classify_url(self.apply_url)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_direct(self) -> bool:
+        """True only when link_type is "direct"."""
+        return self.link_type == "direct"
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
 
     @field_validator("apply_url")
     @classmethod

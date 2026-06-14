@@ -1,4 +1,4 @@
-"""Shared row → Lead parsing for tabular sources (CSV and Google Sheets)."""
+"""Shared row -> Lead parsing for tabular sources (CSV and Google Sheets)."""
 from __future__ import annotations
 
 import logging
@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..models import Lead
+from ..models import Lead, SourceTrust
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +46,26 @@ def _split_requirements(value: Any) -> list[str]:
     return [raw.strip()] if raw.strip() else []
 
 
-def lead_from_record(record: Mapping[str, Any], *, source: str) -> Lead | None:
+def lead_from_record(
+    record: Mapping[str, Any],
+    *,
+    source: str,
+    source_trust: SourceTrust = "unknown",
+) -> Lead | None:
     """Build a Lead from one row; returns None (and logs a warning) for bad rows.
 
-    Header names are normalized ("Apply URL" → apply_url) so sheets with
+    Header names are normalized ("Apply URL" -> apply_url) so sheets with
     human-friendly headers parse the same as the CSV.
+
+    Parameters
+    ----------
+    record:
+        One row from the CSV or Google Sheet, keyed by header name.
+    source:
+        Short identifier for the data source (set on lead.source).
+    source_trust:
+        Trust level of the adapter that produced this lead -- inherited from
+        LeadSource.trust and stored on lead.source_trust.
     """
     row = {str(key).strip().lower().replace(" ", "_"): value for key, value in record.items()}
     try:
@@ -65,6 +80,7 @@ def lead_from_record(record: Mapping[str, Any], *, source: str) -> Lead | None:
             description=str(row.get("description", "")),
             apply_url=str(row.get("apply_url", "")).strip(),
             source=str(row.get("source", "")).strip() or source,
+            source_trust=source_trust,
             date_found=_to_date(row.get("date_found", "")),
             category=str(row.get("category", "") or "remote-jobs").strip(),
             verified=_to_bool(row.get("verified", False)),
@@ -72,7 +88,7 @@ def lead_from_record(record: Mapping[str, Any], *, source: str) -> Lead | None:
     except ValidationError as exc:
         first_error = exc.errors()[0]
         logger.warning(
-            "Skipping malformed lead row (%s — %s): %s: %s",
+            "Skipping malformed lead row (%s -- %s): %s: %s",
             row.get("company") or "?",
             row.get("title") or "?",
             ".".join(str(loc) for loc in first_error.get("loc", ())),

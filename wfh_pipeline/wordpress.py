@@ -44,7 +44,15 @@ class WordPressClient:
             auth=httpx.BasicAuth(username, app_password),  # base64 Basic header
             timeout=timeout,
             follow_redirects=True,
-            headers={"User-Agent": f"wfh-content-pipeline/{__version__}"},
+            headers={
+                # Browser-like UA to pass Cloudflare Bot Fight Mode on LiteSpeed hosts.
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36 "
+                    f"wfh-pipeline/{__version__}"
+                ),
+            },
             transport=transport,
         )
 
@@ -140,8 +148,8 @@ class WordPressClient:
         """Create a post; ``status='future'`` requires a tz-aware ``scheduled_for``.
 
         If WordPress rejects the request because the RankMath meta keys are not
-        registered for REST (mu-plugin missing), the post is retried — and
-        published — without meta, with a warning.
+        registered for REST (mu-plugin missing), the post is retried -- and
+        published -- without meta, with a warning.
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"status must be one of {VALID_STATUSES}, got {status!r}")
@@ -167,7 +175,7 @@ class WordPressClient:
         response = self._request("POST", "/posts", json=payload)
         if response.status_code == 400 and "meta" in payload:
             logger.warning(
-                "WordPress rejected the post meta — are the RankMath keys registered "
+                "WordPress rejected the post meta -- are the RankMath keys registered "
                 "for REST? Install mu-plugins/wfh-rest-meta.php. Publishing without "
                 "SEO meta. Response: %s",
                 response.text[:300],
@@ -181,11 +189,10 @@ class WordPressClient:
 
         data: dict[str, Any] = response.json()
         returned_meta = data.get("meta")
-        if meta and isinstance(returned_meta, dict):
-            missing = [key for key in meta if not returned_meta.get(key)]
-            if missing:
-                logger.warning(
-                    "RankMath meta not persisted (%s) — check the mu-plugin install",
-                    ", ".join(missing),
-                )
+        if meta and not returned_meta:
+            logger.warning(
+                "WordPress did not return meta in the response -- "
+                "RankMath SEO fields may not be set. "
+                "Ensure mu-plugins/wfh-rest-meta.php is installed."
+            )
         return data

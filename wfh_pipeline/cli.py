@@ -11,7 +11,7 @@ from .config import ConfigError, Settings
 from .generation.base import LLMBackend
 from .generation.generator import ContentGenerator
 from .logging_setup import setup_logging
-from .pipeline import LeadResult, Pipeline, PipelineReport
+from .pipeline import Lane, LeadResult, Pipeline, PipelineReport
 from .sources.base import LeadSource
 from .sources.csv_source import CSVLeadSource
 from .state import PostedStore
@@ -28,16 +28,37 @@ class SourceKind(str, Enum):
     csv = "csv"
 
 
+class SourceGroup(str, Enum):
+    """Which source group to pull from when using multi-source mode.
+
+    * ``direct``      — ATS boards configured in boards.yaml (Greenhouse + Lever)
+    * ``aggregator``  — RSS feeds (RemoteOK, WWR, Remotive)
+    * ``all``         — every enabled source in boards.yaml + .env (default)
+    """
+    direct = "direct"
+    aggregator = "aggregator"
+    all = "all"
+
+
 class PostStatus(str, Enum):
     draft = "draft"
     publish = "publish"
     future = "future"
 
 
-def _build_source(kind: SourceKind, csv_path: Path, settings: Settings) -> LeadSource:
+class LaneOption(str, Enum):
+    direct = "direct"
+    aggregator = "aggregator"
+    all = "all"
+
+
+def _build_legacy_source(kind: SourceKind, csv_path: Path, settings: Settings) -> LeadSource:
+    """Build a single-file source (csv or sheets) for backward compatibility."""
     if kind is SourceKind.csv:
         return CSVLeadSource(csv_path)
-    settings.require_sheets()
+    if not hasattr(settings, "require_sheets"):
+        raise ConfigError("Google Sheets source requires GOOGLE_SHEETS_ID and service account.")
+    settings.require_sheets()  # type: ignore[attr-defined]
     from .sources.sheets import GoogleSheetsLeadSource  # lazy: gspread only needed here
 
     return GoogleSheetsLeadSource(
@@ -45,6 +66,13 @@ def _build_source(kind: SourceKind, csv_path: Path, settings: Settings) -> LeadS
         settings.google_sheets_worksheet,
         settings.google_service_account_json,
     )
+
+
+def _build_multi_source(group: SourceGroup, settings: Settings) -> LeadSource:
+    """Build a MultiLeadSource from boards.yaml + .env config."""
+    from .sources.multi import build_sources
+
+    return build_sources(settings, source_group=group.value)
 
 
 def _build_backend(settings: Settings) -> LLMBackend:
@@ -60,12 +88,27 @@ def _build_backend(settings: Settings) -> LLMBackend:
 
 @app.command()
 def run(
-    source: SourceKind = typer.Option(
-        SourceKind.csv, "--source", help="Where to read leads from."
+    # ── Source selection ──────────────────────────────────────────────────────
+    source: Optional[SourceKind] = typer.Option(
+        None,
+        "--source",
+        help=(
+            "Single-file source mode: 'csv' or 'sheets'. "
+            "Mutually exclusive with --source-group."
+        ),
+    ),
+    source_group: SourceGroup = typer.Option(
+        SourceGroup.all,
+        "--source-group",
+        help=(
+            "Multi-source mode: 'direct' (ATS boards only), "
+            "'aggregator' (RSS feeds only), or 'all' (default: everything in boards.yaml)."
+        ),
     ),
     csv_path: Path = typer.Option(
         Path("sample_leads.csv"), "--csv-path", help="CSV file when --source csv."
     ),
+    # ── Run behaviour ─────────────────────────────────────────────────────────
     limit: Optional[int] = typer.Option(
         None, "--limit", min=1, help="Max posts this run (default: POSTS_PER_RUN)."
     ),
@@ -75,16 +118,53 @@ def run(
         help="WordPress post status (default: DEFAULT_POST_STATUS, normally draft).",
     ),
     schedule: bool = typer.Option(
-        False, "--schedule",
+        False,
+        "--schedule",
         help="Spread posts across SCHEDULE_TIMES as status=future.",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run",
+        False,
+        "--dry-run",
         help="Run everything (including the LLM) but do not touch WordPress.",
+    ),
+    lane: LaneOption = typer.Option(
+        LaneOption.direct,
+        "--lane",
+        help=(
+            "Which lead lane to process. "
+            "'direct' (default) = ATS links only; "
+            "'aggregator' = job-board links only; "
+            "'all' = process everything."
+        ),
+    ),
+    resolve_source_links: bool = typer.Option(
+        False,
+        "--resolve-source-links",
+        help=(
+            "Attempt to extract the employer's real apply URL from aggregator listings. "
+            "Only upgrades the URL when it resolves to a known-direct ATS domain."
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
 ) -> None:
-    """Fetch verified leads, generate SEO posts, and publish them to WordPress."""
+    """Fetch verified leads, generate SEO posts, and publish them to WordPress.
+
+    Default (recommended daily run)::
+
+        python -m wfh_pipeline run --dry-run
+
+    This pulls from all ATS boards in boards.yaml and RSS feeds, applies the
+    direct lane filter (ATS leads only by default), generates copy, and shows
+    a dry-run preview without touching WordPress.
+
+    Typical automated run (direct lane, real publish as draft)::
+
+        python -m wfh_pipeline run --lane direct --source-group direct --status draft
+
+    Aggregator review session (inspect RSS leads, post as draft for manual review)::
+
+        python -m wfh_pipeline run --lane aggregator --source-group aggregator --status draft
+    """
     try:
         settings = Settings.load()
     except ConfigError as exc:
@@ -97,7 +177,12 @@ def run(
 
     wordpress: WordPressClient | None = None
     try:
-        lead_source = _build_source(source, csv_path, settings)
+        # Source: explicit --source flag takes precedence (backward compat)
+        if source is not None:
+            lead_source = _build_legacy_source(source, csv_path, settings)
+        else:
+            lead_source = _build_multi_source(source_group, settings)
+
         generator = ContentGenerator(_build_backend(settings), settings.affiliate_links)
         if not dry_run:
             settings.require_wordpress()
@@ -116,6 +201,7 @@ def run(
         wordpress=wordpress,
         timezone=settings.timezone,
         schedule_times=settings.schedule_times,
+        allow_aggregator_autopublish=settings.allow_aggregator_autopublish,
     )
     try:
         report = pipeline.run(
@@ -123,6 +209,8 @@ def run(
             status=effective_status,
             schedule=schedule,
             dry_run=dry_run,
+            lane=lane.value,  # type: ignore[arg-type]
+            resolve_source_links=resolve_source_links,
         )
     finally:
         store.close()
@@ -143,7 +231,7 @@ def _print_report(report: PipelineReport) -> None:
     for result in report.results:
         line = f"  [{result.action}] {result.label}"
         if result.wp_url:
-            line += f" → {result.wp_url}"
+            line += f" -> {result.wp_url}"
         if result.scheduled_for:
             line += f" @ {result.scheduled_for:%Y-%m-%d %H:%M %Z}"
         if result.detail:
@@ -154,21 +242,21 @@ def _print_report(report: PipelineReport) -> None:
 def _print_preview(result: LeadResult) -> None:
     post = result.post
     assert post is not None
-    has_schema = '<script type="application/ld+json">' in result.content_html
-    typer.echo("\n" + "=" * 78)
-    typer.secho(f"DRY RUN — {result.label}", bold=True)
-    typer.echo("=" * 78)
-    typer.echo(f"SEO title:        {post.seo_title}")
-    typer.echo(f"Slug:             {post.slug}")
-    typer.echo(f"Meta description: {post.meta_description}")
-    typer.echo(f"Focus keyword:    {post.focus_keyword}")
-    typer.echo(f"Excerpt:          {post.excerpt}")
+    sep = "-" * 60
+    typer.secho(sep, dim=True)
+    typer.secho(f"DRAFT PREVIEW: {result.label}", bold=True)
+    typer.echo(f"  Title:    {post.seo_title}")
+    typer.echo(f"  Slug:     {post.slug}")
+    typer.echo(f"  Keyword:  {post.focus_keyword}")
+    typer.echo(f"  Excerpt:  {post.excerpt}")
     if result.scheduled_for:
-        typer.echo(f"Scheduled for:    {result.scheduled_for:%Y-%m-%d %H:%M %Z}")
-    typer.echo(f"JSON-LD:          {'included' if has_schema else 'skipped (lead too thin)'}")
-    typer.echo("-" * 78)
-    typer.echo(result.content_html)
+        typer.echo(f"  Schedule: {result.scheduled_for:%Y-%m-%d %H:%M %Z}")
+    typer.secho(sep, dim=True)
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":
-    app()
+    main()

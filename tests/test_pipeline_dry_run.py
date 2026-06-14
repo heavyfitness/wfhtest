@@ -54,7 +54,7 @@ def _make_pipeline(tmp_path: Path) -> tuple[Pipeline, PostedStore, FakeJSONBacke
 
 def test_dry_run_processes_all_verified_leads_without_wordpress(tmp_path: Path) -> None:
     pipeline, store, backend = _make_pipeline(tmp_path)
-    report = pipeline.run(limit=10, status="draft", dry_run=True)
+    report = pipeline.run(limit=10, status="draft", dry_run=True, lane="all")
 
     assert report.count("dry_run") == 4  # the unverified row never enters the pipeline
     assert backend.calls == 4
@@ -73,7 +73,7 @@ def test_dry_run_skips_already_posted_leads(tmp_path: Path) -> None:
     pipeline, store, backend = _make_pipeline(tmp_path)
     store.record(leads[0].id, 1, "https://example.com/?p=1")
 
-    report = pipeline.run(limit=10, status="draft", dry_run=True)
+    report = pipeline.run(limit=10, status="draft", dry_run=True, lane="all")
     assert report.count("skipped_already_posted") == 1
     assert report.count("dry_run") == 3
     assert backend.calls == 3  # no LLM spend on duplicates
@@ -82,7 +82,7 @@ def test_dry_run_skips_already_posted_leads(tmp_path: Path) -> None:
 
 def test_limit_caps_processed_leads(tmp_path: Path) -> None:
     pipeline, store, backend = _make_pipeline(tmp_path)
-    report = pipeline.run(limit=1, status="draft", dry_run=True)
+    report = pipeline.run(limit=1, status="draft", dry_run=True, lane="all")
     assert report.count("dry_run") == 1
     assert backend.calls == 1
     store.close()
@@ -90,7 +90,7 @@ def test_limit_caps_processed_leads(tmp_path: Path) -> None:
 
 def test_schedule_assigns_increasing_future_slots(tmp_path: Path) -> None:
     pipeline, store, _ = _make_pipeline(tmp_path)
-    report = pipeline.run(limit=3, status="draft", schedule=True, dry_run=True)
+    report = pipeline.run(limit=3, status="draft", schedule=True, dry_run=True, lane="all")
     scheduled = [r.scheduled_for for r in report.results if r.action == "dry_run"]
     assert len(scheduled) == 3
     assert all(slot is not None and slot.tzinfo is not None for slot in scheduled)

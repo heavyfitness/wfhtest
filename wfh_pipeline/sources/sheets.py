@@ -14,9 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleSheetsLeadSource(LeadSource):
-    """Reads one worksheet whose first row is the header (same schema as the CSV)."""
+    """Reads one worksheet whose first row is the header (same schema as the CSV).
+
+    Trust defaults to ``"aggregator"`` because a spreadsheet can hold leads
+    from any source, including job-board aggregators.  Override by subclassing
+    and setting ``trust = "direct"`` if your sheet only contains ATS-direct URLs.
+    """
 
     name = "sheets"
+    trust = "aggregator"
 
     def __init__(
         self, sheet_id: str, worksheet: str, service_account_path: str | Path
@@ -33,12 +39,15 @@ class GoogleSheetsLeadSource(LeadSource):
         leads = [
             lead
             for record in records
-            if (lead := lead_from_record(record, source=f"sheets:{self._worksheet}"))
-            is not None
+            if (lead := lead_from_record(
+                record,
+                source=f"sheets:{self._worksheet}",
+                source_trust=self.trust,
+            )) is not None
         ]
         verified = [lead for lead in leads if lead.verified]
         logger.info(
-            "Sheet %s…/%s: %d rows, %d parsed, %d verified/eligible",
+            "Sheet %s.../%s: %d rows, %d parsed, %d verified/eligible",
             self._sheet_id[:8],
             self._worksheet,
             len(records),

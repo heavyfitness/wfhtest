@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -52,6 +53,87 @@ def _parse_affiliate_links(raw: str) -> tuple[AffiliateLink, ...]:
         ) from exc
 
 
+def _parse_domain_list(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated list of domains from an env var."""
+    if not raw:
+        return ()
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def load_boards_yaml(boards_path: str | Path | None = None) -> dict[str, Any]:
+    """Load boards.yaml from the given path or search common locations.
+
+    Returns an empty dict if the file is not found (all sources disabled).
+    """
+    candidates: list[Path] = []
+    if boards_path:
+        candidates.append(Path(boards_path))
+    # Auto-discover relative to CWD and this package
+    candidates += [
+        Path("boards.yaml"),
+        Path(__file__).parent.parent / "boards.yaml",
+    ]
+    for path in candidates:
+        if path.is_file():
+            try:
+                import yaml  # type: ignore[import-untyped]
+                with path.open() as fh:
+                    return yaml.safe_load(fh) or {}
+            except ImportError:
+                # PyYAML not installed — fall back to a tiny parser for simple lists
+                return _simple_yaml_load(path)
+            except Exception:
+                return {}
+    return {}
+
+
+def _simple_yaml_load(path: Path) -> dict[str, Any]:
+    """Minimal YAML parser for boards.yaml without PyYAML installed.
+
+    Only handles the structure we write: top-level keys with scalar values or
+    lists of scalars.  Comments and blank lines are ignored.
+    """
+    result: dict[str, Any] = {}
+    current_key: str | None = None
+    with path.open() as fh:
+        for raw_line in fh:
+            line = raw_line.split("#")[0].rstrip()  # strip comments
+            if not line.strip():
+                continue
+            if line.startswith("  - ") or line.startswith("- "):
+                # List item
+                item = line.strip().lstrip("-").strip()
+                if current_key is not None:
+                    if not isinstance(result.get(current_key), list):
+                        result[current_key] = []
+                    result[current_key].append(item)
+            elif ":" in line and not line.startswith(" "):
+                # Top-level key: value
+                key, _, val = line.partition(":")
+                current_key = key.strip()
+                val = val.strip()
+                if val in ("true", "false"):
+                    result[current_key] = val == "true"
+                elif val:
+                    result[current_key] = val
+                else:
+                    # No value yet — will be populated by following items
+                    pass
+            elif line.startswith("  ") and ":" in line:
+                # Nested key under a dict (e.g. rss: or job_api:)
+                # Handle simple nested scalar/bool values
+                sub_key, _, sub_val = line.strip().partition(":")
+                sub_val = sub_val.strip()
+                if current_key is not None:
+                    if not isinstance(result.get(current_key), dict):
+                        result[current_key] = {}
+                    if sub_val in ("true", "false"):
+                        result[current_key][sub_key.strip()] = sub_val == "true"
+                    elif sub_val:
+                        result[current_key][sub_key.strip()] = sub_val
+    return result
+
+
 @dataclass(frozen=True)
 class Settings:
     """All runtime configuration, loaded once from the environment."""
@@ -77,12 +159,29 @@ class Settings:
     posts_per_run: int
     default_post_status: str
     schedule_times: tuple[str, ...]
+    # Link classification — extend the built-in domain lists via .env
+    extra_direct_domains: tuple[str, ...]
+    extra_aggregator_domains: tuple[str, ...]
+    # Lane policy
+    allow_aggregator_autopublish: bool
     # Storage & logging
     db_path: Path
     log_file: Path
+    # ATS board tokens (from boards.yaml)
+    greenhouse_tokens: tuple[str, ...]
+    lever_slugs: tuple[str, ...]
+    # RSS feed toggles (from boards.yaml)
+    rss_remoteok: bool
+    rss_weworkremotely: bool
+    rss_remotive: bool
+    # Optional job API (off by default)
+    enable_job_api: bool
+    job_api_key: str
+    # Path to boards.yaml (auto-discovered when empty)
+    boards_yaml_path: str
 
     @classmethod
-    def load(cls, env_file: str | Path | None = None) -> "Settings":
+    def load(cls, env_file: str | Path | None = None, boards_path: str | Path | None = None) -> "Settings":
         load_dotenv(env_file or ".env", override=False)
 
         default_post_status = _env("DEFAULT_POST_STATUS", "draft").lower()
@@ -115,6 +214,23 @@ class Settings:
         if not schedule_times:
             raise ConfigError("SCHEDULE_TIMES must contain at least one HH:MM time")
 
+        # Load boards.yaml for ATS tokens and RSS toggles
+        boards = load_boards_yaml(boards_path or _env("BOARDS_YAML_PATH"))
+        gh_tokens = tuple(str(t) for t in boards.get("greenhouse", []) if t)
+        lever_slugs = tuple(str(s) for s in boards.get("lever", []) if s)
+        rss_cfg = boards.get("rss", {}) if isinstance(boards.get("rss"), dict) else {}
+        job_api_cfg = boards.get("job_api", {}) if isinstance(boards.get("job_api"), dict) else {}
+
+        # Individual RSS feed toggles — default on if key missing
+        rss_remoteok = bool(rss_cfg.get("remoteok", True))
+        rss_wwr = bool(rss_cfg.get("weworkremotely", True))
+        rss_remotive = bool(rss_cfg.get("remotive", True))
+
+        # Job API — env var takes precedence over boards.yaml
+        enable_job_api = _env("ENABLE_JOB_API", "false").lower() in ("1", "true", "yes") or bool(
+            job_api_cfg.get("enabled", False)
+        )
+
         return cls(
             wp_url=_env("WP_URL"),
             wp_username=_env("WP_USERNAME"),
@@ -134,8 +250,20 @@ class Settings:
             posts_per_run=_env_int("POSTS_PER_RUN", 3),
             default_post_status=default_post_status,
             schedule_times=schedule_times,
+            extra_direct_domains=_parse_domain_list(_env("EXTRA_DIRECT_DOMAINS")),
+            extra_aggregator_domains=_parse_domain_list(_env("EXTRA_AGGREGATOR_DOMAINS")),
+            allow_aggregator_autopublish=_env("ALLOW_AGGREGATOR_AUTOPUBLISH", "false").lower()
+            in ("1", "true", "yes"),
             db_path=Path(_env("DB_PATH", "data/pipeline_state.db")),
             log_file=Path(_env("LOG_FILE", "logs/pipeline.log")),
+            greenhouse_tokens=gh_tokens,
+            lever_slugs=lever_slugs,
+            rss_remoteok=rss_remoteok,
+            rss_weworkremotely=rss_wwr,
+            rss_remotive=rss_remotive,
+            enable_job_api=enable_job_api,
+            job_api_key=_env("JOB_API_KEY"),
+            boards_yaml_path=str(boards_path or _env("BOARDS_YAML_PATH")),
         )
 
     # ── per-operation validation (only demand what a given run actually needs) ──
@@ -151,20 +279,7 @@ class Settings:
         if self.llm_backend == "anthropic":
             self._require(("ANTHROPIC_API_KEY", self.anthropic_api_key))
 
-    def require_sheets(self) -> None:
-        self._require(("GOOGLE_SHEETS_ID", self.google_sheets_id))
-        if not self.google_service_account_json.exists():
-            raise ConfigError(
-                "Google service account file not found: "
-                f"{self.google_service_account_json} (set GOOGLE_SERVICE_ACCOUNT_JSON)"
-            )
-
-    @staticmethod
-    def _require(*pairs: tuple[str, str]) -> None:
+    def _require(self, *pairs: tuple[str, str]) -> None:
         missing = [name for name, value in pairs if not value]
         if missing:
-            raise ConfigError(
-                "Missing required settings: "
-                + ", ".join(missing)
-                + ". Copy .env.example to .env and fill them in."
-            )
+            raise ConfigError(f"Required env vars not set: {', '.join(missing)}")

@@ -1,4 +1,4 @@
-"""Local CSV lead source — mirrors the Google Sheet schema; used for testing."""
+"""Local CSV lead source -- mirrors the Google Sheet schema; used for testing."""
 from __future__ import annotations
 
 import logging
@@ -14,7 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 class CSVLeadSource(LeadSource):
+    """CSV-backed lead source.
+
+    Trust defaults to ``"aggregator"`` because a CSV can hold any leads,
+    including aggregator-sourced ones.  Override by subclassing and setting
+    ``trust = "direct"`` if you know your CSV only contains ATS-direct links.
+    """
+
     name = "csv"
+    trust = "aggregator"
 
     def __init__(self, csv_path: str | Path) -> None:
         self._path = Path(csv_path)
@@ -27,7 +35,11 @@ class CSVLeadSource(LeadSource):
         leads = [
             lead
             for record in records
-            if (lead := lead_from_record(record, source=f"csv:{self._path.name}")) is not None
+            if (lead := lead_from_record(
+                record,
+                source=f"csv:{self._path.name}",
+                source_trust=self.trust,
+            )) is not None
         ]
         verified = [lead for lead in leads if lead.verified]
         logger.info(

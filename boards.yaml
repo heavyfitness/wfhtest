@@ -1,0 +1,41 @@
+# boards.yaml — ATS board configuration for wfh_pipeline
+#
+# Each entry under `greenhouse` is a Greenhouse job-board token.
+# Find yours at: https://boards.greenhouse.io/<token>/jobs
+#
+# Each entry under `lever` is a Lever company slug.
+# Find yours at: https://jobs.lever.co/<slug>
+#
+# All Greenhouse boards below were verified 2026-06-13 and return remote jobs.
+# Verification status: anthropic=35 remote, stripe=92, gitlab=137, twilio=153,
+# vercel=17, airtable=14, discord=9, datadog=50
+#
+# Boards that returned 404 or 0 remote jobs (do NOT add):
+#   openai, notion, figma, linearapp, retool, zapier, shopify, github,
+#   automattic, hashicorp, hubspot
+
+greenhouse:
+  - anthropic       # 35 remote roles — AI safety / engineering
+  - stripe          # 92 remote roles — payments infrastructure
+  - gitlab          # 137 remote roles — fully-distributed company
+  - twilio          # 153 remote roles — communications platform
+  - vercel          # 17 remote roles — frontend/edge infrastructure
+  - airtable        # 14 remote roles — no-code platform
+  - discord         # 9 remote roles  — community platform
+  - datadog         # 50 remote roles — observability/monitoring
+
+# Lever boards — add slugs for companies on jobs.lever.co/<slug>
+# Note: Lever's v0 public API is deprecated for many companies.
+# The source will log a warning and skip any slug that returns 404.
+lever: []
+
+# RSS / aggregator feeds (always enabled; set to false to disable individually)
+rss:
+  remoteok: true
+  weworkremotely: true
+  remotive: true
+
+# Optional structured job API (disabled by default — add key to .env to enable)
+# Set ENABLE_JOB_API=true and JOB_API_KEY=<your-key> in .env to activate.
+job_api:
+  enabled: false

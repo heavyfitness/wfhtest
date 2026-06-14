@@ -19,15 +19,16 @@ logger = logging.getLogger(__name__)
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 # Appended to every post body: FTC affiliate disclosure + due-diligence note.
-DISCLOSURE_HTML = """\
-<hr />
-<p><em>Affiliate disclosure: some links on this page are affiliate links. If you \
-sign up through them, The WFH Connect may earn a commission at no extra cost to \
-you. We only recommend tools we genuinely rate.</em></p>
-<p><em>Job details can change at any time. We verify leads before posting, but \
-always do your own due diligence: confirm the listing on the employer's official \
-site, never pay to apply, and never share financial information during an \
-application.</em></p>"""
+DISCLOSURE_HTML = (
+    "<hr />\n"
+    "<p><em>Affiliate disclosure: some links on this page are affiliate links. If you "
+    "sign up through them, The WFH Connect may earn a commission at no extra cost to "
+    "you. We only recommend tools we genuinely rate.</em></p>\n"
+    "<p><em>Job details can change at any time. We verify leads before posting, but "
+    "always do your own due diligence: confirm the listing on the employer's official "
+    "site, never pay to apply, and never share financial information during an "
+    "application.</em></p>"
+)
 
 
 class ContentGenerationError(RuntimeError):
@@ -52,23 +53,23 @@ def extract_json(text: str) -> dict:
 
 
 def render_affiliate_section(links: Sequence[AffiliateLink]) -> str:
-    """A clearly-labelled "Recommended tools" block built from config, not the LLM."""
+    """A clearly-labelled 'Recommended tools' block built from config, not the LLM."""
     items: list[str] = []
     for link in links:
-        blurb = f" — {html.escape(link.blurb)}" if link.blurb else ""
+        blurb = f" -- {html.escape(link.blurb)}" if link.blurb else ""
         items.append(
             f'<li><a href="{html.escape(link.url, quote=True)}" rel="sponsored noopener" '
             f'target="_blank">{html.escape(link.name)}</a>{blurb}</li>'
         )
     return (
         "<h2>Recommended tools for your remote job search</h2>\n"
-        "<p>A few services we use and recommend (some are affiliate links — see the "
+        "<p>A few services we use and recommend (some are affiliate links -- see the "
         "disclosure below):</p>\n<ul>\n" + "\n".join(items) + "\n</ul>"
     )
 
 
 class ContentGenerator:
-    """LLM wrapper: prompt → JSON → GeneratedPost, plus deterministic post-processing.
+    """LLM wrapper: prompt -> JSON -> GeneratedPost, plus deterministic post-processing.
 
     The affiliate section, FTC disclosure, and (if the model forgot it) the apply
     button are appended in code so they can never be mangled or omitted by the LLM.
@@ -97,7 +98,7 @@ class ContentGenerator:
             except (ContentGenerationError, ValidationError) as exc:
                 last_error = exc
                 logger.warning(
-                    "Attempt %d/%d produced unusable output for %s (%s — %s): %s",
+                    "Attempt %d/%d produced unusable output for %s (%s -- %s): %s",
                     attempt,
                     self._max_attempts,
                     lead.id,
@@ -108,7 +109,7 @@ class ContentGenerator:
         if post is None:
             raise ContentGenerationError(
                 f"Could not generate valid post JSON for lead {lead.id} "
-                f"({lead.company} — {lead.title})"
+                f"({lead.company} -- {lead.title})"
             ) from last_error
         return self._finalize(lead, post)
 
@@ -116,7 +117,7 @@ class ContentGenerator:
         sections = [post.body_html.strip()]
         if not body_contains_apply_url(post.body_html, lead.apply_url):
             logger.warning("LLM omitted the apply link for %s; appending one", lead.id)
-            sections.append(f"<h2>How to apply</h2>\n{apply_anchor_html(lead.apply_url)}")
+            sections.append(f"<h2>How to apply</h2>\n{apply_anchor_html(lead)}")
         if self._affiliate_links:
             sections.append(render_affiliate_section(self._affiliate_links))
         sections.append(DISCLOSURE_HTML)

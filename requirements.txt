@@ -6,6 +6,7 @@ python-dotenv>=1.0
 typer>=0.12
 
 # Lead sources
+feedparser>=6.0
 gspread>=6.0
 google-auth>=2.29
 pandas>=2.2

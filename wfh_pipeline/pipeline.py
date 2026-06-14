@@ -1,4 +1,4 @@
-"""Orchestrator: fetch leads → generate → QC → schema → publish → record."""
+"""Orchestrator: fetch leads -> generate -> QC -> schema -> publish -> record."""
 from __future__ import annotations
 
 import logging
@@ -21,19 +21,20 @@ from .wordpress import WordPressClient, WordPressError
 logger = logging.getLogger(__name__)
 
 Action = Literal["posted", "dry_run", "skipped_already_posted", "skipped_qc", "error"]
+Lane = Literal["direct", "aggregator", "all"]
 
 
 @dataclass
 class LeadResult:
     lead_id: str
-    label: str  # "Company — Title"
+    label: str  # "Company -- Title"
     action: Action
     detail: str = ""
     wp_post_id: int | None = None
     wp_url: str = ""
     scheduled_for: datetime | None = None
     post: GeneratedPost | None = None
-    content_html: str = ""  # final body incl. JSON-LD — exactly what goes to WP
+    content_html: str = ""  # final body incl. JSON-LD -- exactly what goes to WP
 
 
 @dataclass
@@ -60,7 +61,7 @@ def compute_schedule(
     """Next ``count`` publish slots, spreading posts across ``times`` each day.
 
     Slots earlier than now+5min are skipped, so a 9am run with times
-    08:00/12:00/16:00 schedules today 12:00, today 16:00, tomorrow 08:00, …
+    08:00/12:00/16:00 schedules today 12:00, today 16:00, tomorrow 08:00, ...
     ``now``, when given, must be timezone-aware.
     """
     tz = ZoneInfo(tz_name)
@@ -82,7 +83,7 @@ def compute_schedule(
 class Pipeline:
     """Wires a lead source, generator, dedup store, and WP client together.
 
-    ``wordpress`` may be None for dry runs — the pipeline refuses to do a real
+    ``wordpress`` may be None for dry runs -- the pipeline refuses to do a real
     run without it.
     """
 
@@ -95,6 +96,7 @@ class Pipeline:
         wordpress: WordPressClient | None = None,
         timezone: str = "America/New_York",
         schedule_times: Sequence[str] = ("08:00", "12:00", "16:00"),
+        allow_aggregator_autopublish: bool = False,
     ) -> None:
         self._source = source
         self._generator = generator
@@ -102,6 +104,7 @@ class Pipeline:
         self._wordpress = wordpress
         self._timezone = timezone
         self._schedule_times = tuple(schedule_times)
+        self._allow_aggregator_autopublish = allow_aggregator_autopublish
 
     def run(
         self,
@@ -110,6 +113,8 @@ class Pipeline:
         status: str = "draft",
         schedule: bool = False,
         dry_run: bool = False,
+        lane: Lane = "direct",
+        resolve_source_links: bool = False,
     ) -> PipelineReport:
         report = PipelineReport()
         leads = self._source.fetch_new_leads()
@@ -119,7 +124,7 @@ class Pipeline:
         for lead in eligible:
             if self._store.is_posted(lead.id):
                 logger.info(
-                    "Skipping already-posted lead %s (%s — %s)",
+                    "Skipping already-posted lead %s (%s -- %s)",
                     lead.id, lead.company, lead.title,
                 )
                 report.results.append(
@@ -128,6 +133,28 @@ class Pipeline:
                 )
             else:
                 fresh.append(lead)
+
+        # Optional: try to extract real employer apply URLs from aggregator pages.
+        if resolve_source_links:
+            from .link_resolver import try_resolve_lead
+            resolved: list[Lead] = []
+            for lead in fresh:
+                resolved.append(try_resolve_lead(lead))
+            fresh = resolved
+
+        # Lane filter: route leads to the correct publishing lane based on
+        # whether the apply URL resolves to a direct ATS domain.
+        if lane != "all":
+            before = len(fresh)
+            if lane == "direct":
+                fresh = [lead for lead in fresh if lead.is_direct]
+            else:  # lane == "aggregator"
+                fresh = [lead for lead in fresh if not lead.is_direct]
+            skipped = before - len(fresh)
+            if skipped:
+                logger.info(
+                    "Lane filter %r: skipped %d lead(s) (wrong lane)", lane, skipped
+                )
 
         if limit is not None:
             fresh = fresh[:limit]
@@ -148,6 +175,23 @@ class Pipeline:
 
         for lead in fresh:
             label = f"{lead.company} — {lead.title}"
+
+            # Aggregator autopublish guard -- downgrade to draft when the lead's
+            # apply URL is not direct and ALLOW_AGGREGATOR_AUTOPUBLISH is off.
+            lead_status = effective_status
+            if not lead.is_direct and not self._allow_aggregator_autopublish:
+                if lead_status != "draft":
+                    logger.info(
+                        "AGGREGATOR -- needs manual direct-link review before publishing"
+                        " (%s); forcing status=draft", label,
+                    )
+                    lead_status = "draft"
+                else:
+                    logger.info(
+                        "AGGREGATOR -- needs manual direct-link review before publishing"
+                        " (%s)", label,
+                    )
+
             try:
                 post = self._generator.generate(lead)
             except Exception as exc:  # any backend/parse failure: skip, don't crash the run
@@ -171,7 +215,7 @@ class Pipeline:
                 logger.info(
                     "[dry-run] Would publish %r as %s%s",
                     post.seo_title,
-                    effective_status,
+                    lead_status,
                     f" at {scheduled_for:%Y-%m-%d %H:%M %Z}" if scheduled_for else "",
                 )
                 report.results.append(
@@ -183,7 +227,7 @@ class Pipeline:
             try:
                 report.results.append(
                     self._publish(lead, post, content_html,
-                                  status=effective_status, scheduled_for=scheduled_for)
+                                  status=lead_status, scheduled_for=scheduled_for)
                 )
             except WordPressError as exc:
                 logger.error("WordPress publish failed for %s: %s", label, exc)
@@ -237,7 +281,7 @@ class Pipeline:
         wp_post_id = int(data["id"]) if data.get("id") else None
         wp_url = str(data.get("link", ""))
         self._store.record(lead.id, wp_post_id, wp_url)
-        logger.info("Published %s → %s (%s)", lead.id, wp_url or wp_post_id, status)
+        logger.info("Published %s -> %s (%s)", lead.id, wp_url or wp_post_id, status)
         return LeadResult(
             lead.id,
             f"{lead.company} — {lead.title}",

@@ -11,6 +11,16 @@ MAX_BODY_CHARS = 60_000
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
+# Phrases that assert a direct-apply relationship; banned when the lead's
+# apply URL is NOT classified as direct.
+_DIRECT_APPLY_PHRASES: tuple[str, ...] = (
+    "apply directly",
+    "direct apply",
+    "apply directly on their site",
+    "apply directly with",
+    "apply directly to",
+)
+
 
 def body_contains_apply_url(body_html: str, apply_url: str) -> bool:
     """True if the body links the apply URL (raw or attribute-escaped)."""
@@ -54,5 +64,19 @@ def validate_post(lead: Lead, post: GeneratedPost) -> list[str]:
         problems.append("apply_url missing from body")
     if "<script" in body.lower():
         problems.append("body contains a <script> tag")
+
+    # Backstop: reject "direct apply" framing when the URL is not actually direct.
+    # This catches LLM drift back to direct-apply language despite the LINK FRAMING
+    # prompt instruction.
+    if not lead.is_direct:
+        body_lower = body.lower()
+        for phrase in _DIRECT_APPLY_PHRASES:
+            if phrase in body_lower:
+                problems.append(
+                    f"body uses direct-apply framing ({phrase!r}) but "
+                    f"apply_url is classified as {lead.link_type!r} "
+                    "(not direct) -- update the copy or resolve the source link"
+                )
+                break  # one problem per lead is enough
 
     return problems

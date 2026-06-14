@@ -245,3 +245,222 @@ nothing recorded as posted).
 | Google Sheets `PERMISSION_DENIED` | share the sheet with the service account's `client_email` |
 | posts publish but Google for Jobs ignores them | give leads real descriptions/requirements; check the JSON-LD with Google's Rich Results Test |
 | LiteSpeed cache shows stale archive pages | LiteSpeed Cache → purge on post publish is on by default; re-check **Cache → Purge** settings |
+
+## Direct-apply pledge & two-lane publishing
+
+The WFH Connect pledges to label every apply link honestly.
+The pipeline enforces this in code — not just in an LLM prompt.
+
+### How it works
+
+Every lead's `apply_url` is classified at instantiation time:
+
+| `link_type` | Meaning |
+|---|---|
+| `direct` | URL domain is a known ATS (Greenhouse, Lever, Workday, iCIMS, …) |
+| `aggregator` | URL domain is a job board (RemoteOK, We Work Remotely, Indeed, …) |
+| `unknown` | Neither list matched |
+
+Two computed fields are always derived from the URL, never stored:
+- `lead.link_type` — `"direct"` / `"aggregator"` / `"unknown"`
+- `lead.is_direct` — `True` only when `link_type == "direct"`
+
+### Two publishing lanes
+
+| Lane | `--lane` value | What runs | Default? |
+|---|---|---|---|
+| **Direct** | `direct` | ATS-sourced leads only (`is_direct=True`) | Yes |
+| **Aggregator** | `aggregator` | Job-board leads only (`is_direct=False`) | No |
+| **All** | `all` | Every verified lead | No |
+
+```bash
+# Default: only ATS-direct leads — safe to auto-publish
+python -m wfh_pipeline
+
+# Review aggregator listings manually before they go live
+python -m wfh_pipeline --lane aggregator --status draft
+
+# Process everything (direct + aggregator)
+python -m wfh_pipeline --lane all
+```
+
+### Honest-labeling rule
+
+The post generator receives an explicit `LINK FRAMING` instruction:
+
+- **Direct lead** — anchor text reads "Apply directly on their site"
+- **Aggregator lead** — anchor text reads "View this listing on \<Board Name\>"
+
+The QC gate then **rejects** any post that contains "apply directly" or "direct apply"
+language when the URL is classified as aggregator or unknown. This is a hard code check,
+not a prompt-drift risk.
+
+### Aggregator auto-publish guard
+
+By default (`ALLOW_AGGREGATOR_AUTOPUBLISH=false`), any aggregator lead that reaches the
+publish step is forced to `status=draft` and logged:
+
+```
+AGGREGATOR — needs manual direct-link review before publishing (<Company> — <Title>)
+```
+
+Set `ALLOW_AGGREGATOR_AUTOPUBLISH=true` in `.env` only when you've verified the listing
+links directly to the employer's own ATS.
+
+### Aggregator review session
+
+1. Run `python -m wfh_pipeline --lane aggregator --status draft` to collect drafts.
+2. In WordPress → Posts, filter by status=Draft and look for the aggregator log tag.
+3. For each draft: click through to the job board, find the real employer apply URL.
+4. If it resolves to a known ATS domain, update the draft's apply link and publish.
+5. Otherwise, leave as draft or delete.
+
+**Shortcut — resolve source links:**
+```bash
+python -m wfh_pipeline --lane aggregator --resolve-source-links --status draft
+```
+This attempts to follow each aggregator listing's outbound apply link. If it resolves to a
+known ATS domain, the lead's URL is upgraded automatically before content generation.
+Only confirmed-direct upgrades are accepted; unknown destinations are left unchanged.
+
+### Extending the domain lists
+
+Add domains to the built-in lists without touching code:
+
+```dotenv
+# .env
+EXTRA_DIRECT_DOMAINS=jobs.mycompany.com,*.myats.io
+EXTRA_AGGREGATOR_DOMAINS=jobs.internal-board.example.org
+```
+
+Wildcard prefixes (`*.domain.com`) match any subdomain.
+
+---
+
+## Multi-source lead intake (Part 5)
+
+The pipeline supports pulling from multiple lead sources simultaneously, deduplicated across runs via the SQLite store.
+
+### Source types
+
+| Source | File | `source_trust` | Default lane | Live? |
+|--------|------|----------------|-------------|-------|
+| Greenhouse Job Board API | `sources/greenhouse.py` | `direct` | direct | ✅ |
+| Lever postings API | `sources/lever.py` | `direct` | direct | ✅ (if token valid) |
+| RemoteOK RSS | `sources/rss.py` | `aggregator` | aggregator | ✅ |
+| We Work Remotely RSS | `sources/rss.py` | `aggregator` | aggregator | ✅ |
+| Remotive JSON API | `sources/rss.py` | `aggregator` | aggregator | ✅ |
+| JSearch/RapidAPI | `sources/job_api.py` | `unknown` (per URL) | varies | off by default |
+| CSV file | `sources/csv_source.py` | `aggregator` | — | legacy |
+| Google Sheets | `sources/sheets.py` | `aggregator` | — | legacy |
+
+### boards.yaml
+
+ATS board tokens and RSS toggles are configured in `boards.yaml` (repo root):
+
+```yaml
+greenhouse:
+  - anthropic      # verified: 35 remote roles
+  - stripe         # verified: 92 remote roles
+  - gitlab         # verified: 137 remote roles (all-remote company)
+  - twilio         # verified: 153 remote roles
+  - vercel         # verified: 17 remote roles
+  - airtable       # verified: 14 remote roles
+  - discord        # verified: 9 remote roles
+  - datadog        # verified: 50 remote roles
+
+lever:
+  - whereby        # example; add slugs from jobs.lever.co/<slug>
+
+rss:
+  remoteok: true
+  weworkremotely: true
+  remotive: true
+```
+
+**Adding a Greenhouse board:** find the board token in the URL `https://boards.greenhouse.io/<token>/jobs` and add it to the `greenhouse` list. The pipeline will automatically include it on the next run.
+
+**Adding a Lever board:** the token is the slug in `https://jobs.lever.co/<slug>`. Note that many companies have migrated off Lever's v0 public API — the source logs a warning and returns an empty list on 404.
+
+**Greenhouse boards that returned 404 or 0 remote jobs (as of 2026-06-13, do not add):** openai, notion, figma, linearapp, retool, zapier, shopify, github, automattic, hashicorp.
+
+### Source group CLI flag
+
+```bash
+# All sources (default) — ATS + RSS, then lane filter applied
+python -m wfh_pipeline run --source-group all --lane direct
+
+# ATS boards only (direct lane; recommended for automated daily runs)
+python -m wfh_pipeline run --source-group direct --lane direct
+
+# RSS feeds only (aggregator lane; posts as draft for manual review)
+python -m wfh_pipeline run --source-group aggregator --lane aggregator --status draft
+
+# Legacy single-file modes (backward compatible)
+python -m wfh_pipeline run --source csv --csv-path my_leads.csv
+python -m wfh_pipeline run --source sheets
+```
+
+### Recommended daily automated run
+
+```bash
+# Morning run: pull from all ATS boards, publish direct-apply leads as drafts
+python -m wfh_pipeline run \
+  --source-group direct \
+  --lane direct \
+  --status draft \
+  --limit 5
+
+# Weekly aggregator review: pull RSS, flag for manual direct-link review
+python -m wfh_pipeline run \
+  --source-group aggregator \
+  --lane aggregator \
+  --status draft \
+  --resolve-source-links
+```
+
+### Google Alerts → RSS routing
+
+Google Alerts does not provide a direct API, but it can emit an RSS feed for any search query. To route a Google Alert into the pipeline:
+
+1. Create an alert at https://www.google.com/alerts for e.g. `"remote software engineer" site:greenhouse.io`
+2. Set delivery to **RSS feed** and copy the feed URL
+3. Add a custom `RSSLeadSource` subclass pointing to that URL:
+
+```python
+from wfh_pipeline.sources.rss import RSSLeadSource
+from wfh_pipeline.models import Lead
+
+class GoogleAlertSource(RSSLeadSource):
+    name = "google_alert"
+    feed_url = "https://www.google.com/alerts/feeds/YOUR_ALERT_ID/YOUR_TOKEN"
+
+    def _parse_entry(self, entry):
+        # Google Alerts entries have title and link; extract company from title
+        title = entry.get("title", "")
+        link = entry.get("link", "")
+        if not link:
+            return None
+        return Lead(
+            company="Unknown",  # Refine with --resolve-source-links
+            title=title,
+            apply_url=link,
+            source="google_alert",
+            source_trust=self.trust,
+            verified=True,
+        )
+```
+
+Add the source to `build_sources()` in `sources/multi.py` or instantiate it directly.
+
+### Optional JSearch/RapidAPI source
+
+```dotenv
+# .env
+ENABLE_JOB_API=true
+JOB_API_KEY=your-rapidapi-key
+JOB_API_QUERY=remote software engineer
+JOB_API_MAX_RESULTS=20
+```
+
+JSearch results include direct employer ATS URLs for many roles — these will classify as `link_type="direct"` and enter the direct lane automatically. Others classify as aggregator. The pipeline's lane filter handles routing correctly.
