@@ -12,9 +12,12 @@ Activation
        ENABLE_JOB_API=true
        JOB_API_KEY=your-rapidapi-key
 
-3. Optionally tune the query::
+3. Tune the queries (comma-separated list)::
 
-       JOB_API_QUERY=remote software engineer
+       JOB_API_QUERIES=remote customer service no experience,remote data entry,remote chat support entry level
+
+4. Cap results per query (default 20)::
+
        JOB_API_MAX_RESULTS=20
 
 The source is **disabled** by default (``ENABLE_JOB_API=false``).  If
@@ -32,6 +35,18 @@ platforms.  Each lead's URL is classified by the existing
 
 This means a single JSearch run may yield leads in both lanes; the pipeline's
 lane filter handles the routing correctly.
+
+Multiple queries
+----------------
+Pass a list of queries to the constructor to run several searches in one call
+and deduplicate the combined results by job ID.  Results are interleaved in
+round-robin order so no single query dominates::
+
+    source = JobAPILeadSource(
+        api_key,
+        queries=["remote customer service", "remote data entry"],
+        max_results_per_query=20,
+    )
 """
 from __future__ import annotations
 
@@ -64,10 +79,15 @@ class JobAPILeadSource(LeadSource):
     api_key:
         RapidAPI key (from ``JOB_API_KEY`` in ``.env``).
     query:
-        Search query passed to the API.  Defaults to ``"remote software engineer"``.
-    max_results:
-        Maximum number of results to fetch (capped by the API at 10 per page;
-        we fetch ``ceil(max_results / 10)`` pages).
+        **Single** search query.  Ignored when *queries* is provided.
+        Defaults to ``"remote customer service"``.
+    queries:
+        List of search queries to run in sequence.  Results are combined and
+        deduplicated by job ID.  When provided, *query* is ignored.
+    max_results_per_query:
+        Maximum number of results to fetch **per query** (capped by the API at
+        10 per page).  Total leads ≤ ``len(queries) * max_results_per_query``.
+        Alias ``max_results`` still accepted for single-query backwards compat.
     """
 
     name = "job_api"
@@ -77,19 +97,20 @@ class JobAPILeadSource(LeadSource):
         self,
         api_key: str,
         *,
-        query: str = "remote software engineer",
-        max_results: int = 20,
+        query: str = "remote customer service",
+        queries: list[str] | None = None,
+        max_results: int = 20,          # kept for backwards compat
+        max_results_per_query: int | None = None,
     ) -> None:
         self._api_key = api_key
-        self._query = query
-        self._max_results = max_results
+        self._queries = list(queries) if queries else [query]
+        self._max_per_query = max_results_per_query if max_results_per_query is not None else max_results
 
     def fetch_new_leads(self) -> list[Lead]:
         import math
 
-        pages = max(1, math.ceil(self._max_results / 10))
-        leads: list[Lead] = []
-        logger.info("JobAPILeadSource: fetching up to %d results (%d page(s))", self._max_results, pages)
+        all_leads: list[Lead] = []
+        seen_job_ids: set[str] = set()
 
         headers = {
             "x-rapidapi-host": _JSEARCH_HOST,
@@ -97,46 +118,73 @@ class JobAPILeadSource(LeadSource):
         }
 
         with httpx.Client(timeout=20) as client:
-            for page in range(1, pages + 1):
-                params = {
-                    "query": self._query,
-                    "page": str(page),
-                    "num_pages": "1",
-                    "remote_jobs_only": "true",
-                }
-                try:
-                    resp = client.get(_JSEARCH_URL, headers=headers, params=params)
-                    resp.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 403:
+            for query in self._queries:
+                logger.info(
+                    "JobAPILeadSource: query %r — fetching up to %d results",
+                    query, self._max_per_query,
+                )
+                pages = max(1, math.ceil(self._max_per_query / 10))
+                query_leads: list[Lead] = []
+
+                for page in range(1, pages + 1):
+                    params = {
+                        "query": query,
+                        "page": str(page),
+                        "num_pages": "1",
+                        "remote_jobs_only": "true",
+                    }
+                    try:
+                        resp = client.get(_JSEARCH_URL, headers=headers, params=params)
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 403:
+                            logger.error(
+                                "JobAPILeadSource: 403 Forbidden — check JOB_API_KEY is valid "
+                                "and subscribed to JSearch on RapidAPI"
+                            )
+                        else:
+                            logger.error(
+                                "JobAPILeadSource: HTTP %d on query %r page %d",
+                                exc.response.status_code, query, page,
+                            )
+                        break
+                    except httpx.HTTPError as exc:
                         logger.error(
-                            "JobAPILeadSource: 403 Forbidden — check JOB_API_KEY is valid "
-                            "and subscribed to JSearch on RapidAPI"
+                            "JobAPILeadSource: request error on query %r page %d: %s",
+                            query, page, exc,
                         )
-                    else:
-                        logger.error("JobAPILeadSource: HTTP %d on page %d", exc.response.status_code, page)
-                    break
-                except httpx.HTTPError as exc:
-                    logger.error("JobAPILeadSource: request error on page %d: %s", page, exc)
-                    break
-
-                data = resp.json()
-                jobs = data.get("data", [])
-                if not jobs:
-                    break
-
-                for job in jobs:
-                    lead = self._job_to_lead(job)
-                    if lead is not None:
-                        leads.append(lead)
-                    if len(leads) >= self._max_results:
                         break
 
-                if len(leads) >= self._max_results:
-                    break
+                    data = resp.json()
+                    jobs = data.get("data", [])
+                    if not jobs:
+                        break
 
-        logger.info("JobAPILeadSource: %d leads fetched", len(leads))
-        return leads
+                    for job in jobs:
+                        job_id = str(job.get("job_id", ""))
+                        if job_id and job_id in seen_job_ids:
+                            continue  # duplicate across queries
+                        lead = self._job_to_lead(job)
+                        if lead is not None:
+                            if job_id:
+                                seen_job_ids.add(job_id)
+                            query_leads.append(lead)
+                        if len(query_leads) >= self._max_per_query:
+                            break
+
+                    if len(query_leads) >= self._max_per_query:
+                        break
+
+                logger.info(
+                    "JobAPILeadSource: query %r → %d leads", query, len(query_leads)
+                )
+                all_leads.extend(query_leads)
+
+        logger.info(
+            "JobAPILeadSource: %d total leads from %d queries",
+            len(all_leads), len(self._queries),
+        )
+        return all_leads
 
     def _job_to_lead(self, job: dict) -> Lead | None:
         title = str(job.get("job_title", "")).strip()
@@ -202,8 +250,10 @@ def _guess_category(title: str, skills: list) -> str:
         return "marketing"
     if any(kw in blob for kw in ("sales", "account executive", "business development")):
         return "sales"
-    if any(kw in blob for kw in ("customer success", "support", "customer service")):
+    if any(kw in blob for kw in ("customer success", "customer service", "customer support", "customer care", "chat support", "support agent", "support representative")):
         return "customer-success"
+    if any(kw in blob for kw in ("data entry", "virtual assistant", "administrative", "clerical")):
+        return "admin"
     if any(kw in blob for kw in ("product manager", "product owner")):
         return "product"
     if any(kw in blob for kw in ("data scientist", "data analyst", "ml engineer", "machine learning", "analyst")):

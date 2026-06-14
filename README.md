@@ -455,12 +455,49 @@ Add the source to `build_sources()` in `sources/multi.py` or instantiate it dire
 
 ### Optional JSearch/RapidAPI source
 
+Sign up at [RapidAPI](https://rapidapi.com) and subscribe to [JSearch](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) (free tier available), then set:
+
 ```dotenv
 # .env
 ENABLE_JOB_API=true
 JOB_API_KEY=your-rapidapi-key
-JOB_API_QUERY=remote software engineer
+
+# Comma-separated queries — each runs independently, results are combined and
+# deduplicated by job ID. Defaults below target WFH Connect's audience.
+JOB_API_QUERIES=remote customer service no experience,remote data entry no experience,remote chat support entry level,virtual assistant remote,remote customer support associate
+
+# Max results per query (20 = 2 API pages per query)
 JOB_API_MAX_RESULTS=20
 ```
 
-JSearch results include direct employer ATS URLs for many roles — these will classify as `link_type="direct"` and enter the direct lane automatically. Others classify as aggregator. The pipeline's lane filter handles routing correctly.
+JSearch results include direct employer ATS URLs for many roles — these classify as `link_type="direct"` and enter the direct lane automatically. Others classify as aggregator. The pipeline's lane filter handles routing correctly.
+
+> **Note on BPO employers:** The biggest remote CS employers (Concentrix, TTEC, Teleperformance, Sitel, Sutherland, Conduent, BroadPath, Alorica, TaskUs, LiveOps, Arise, Working Solutions) are NOT on Greenhouse — they use iCIMS, Taleo, Workday, or proprietary portals. JSearch is the primary volume driver for entry-level CS / data-entry leads from these employers.
+
+### Relevance / quality filter
+
+Applied automatically after lane filtering to skip roles that don't fit WFH Connect's audience (senior engineering titles, director-level posts, talent-community placeholders, etc.).
+
+```dotenv
+# .env — all optional; built-in defaults are tuned for WFH Connect
+
+# At least ONE must appear in title or description to keep the lead.
+# Leave blank to use built-in defaults (customer service, data entry, etc.)
+RELEVANCE_INCLUDE_KEYWORDS=
+
+# If ANY appears in the job TITLE, the lead is rejected.
+# Leave blank to use built-in defaults (senior, staff, principal, engineer…)
+RELEVANCE_EXCLUDE_TITLE=
+
+# Set true to disable the include-keyword requirement (only exclude applies).
+# Useful for small, curated boards where you trust all titles.
+RELEVANCE_PERMISSIVE=false
+```
+
+Disable the filter entirely for a single run with `--no-relevance-filter`:
+
+```bash
+python -m wfh_pipeline run --dry-run --no-relevance-filter
+```
+
+The filter is a **pre-generation gate** — it saves Anthropic API cost by never generating copy for roles outside your audience. It does not affect QC, lane policy, or the direct-apply pledge.

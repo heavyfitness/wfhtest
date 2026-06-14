@@ -12,6 +12,7 @@ from .generation.base import LLMBackend
 from .generation.generator import ContentGenerator
 from .logging_setup import setup_logging
 from .pipeline import Lane, LeadResult, Pipeline, PipelineReport
+from .relevance import RelevanceFilter
 from .sources.base import LeadSource
 from .sources.csv_source import CSVLeadSource
 from .state import PostedStore
@@ -145,6 +146,16 @@ def run(
             "Only upgrades the URL when it resolves to a known-direct ATS domain."
         ),
     ),
+    no_relevance_filter: bool = typer.Option(
+        False,
+        "--no-relevance-filter",
+        help=(
+            "Disable the title/description relevance filter. "
+            "By default the filter skips senior/engineering roles and requires "
+            "at least one entry-level / CS / data-entry keyword. "
+            "Set to pass all leads through regardless of title."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
 ) -> None:
     """Fetch verified leads, generate SEO posts, and publish them to WordPress.
@@ -194,6 +205,11 @@ def run(
         typer.secho(f"Config error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
+    # Relevance filter: on by default; disable with --no-relevance-filter.
+    relevance_filter: RelevanceFilter | None = None
+    if not no_relevance_filter:
+        relevance_filter = RelevanceFilter.from_env()
+
     pipeline = Pipeline(
         source=lead_source,
         generator=generator,
@@ -202,6 +218,7 @@ def run(
         timezone=settings.timezone,
         schedule_times=settings.schedule_times,
         allow_aggregator_autopublish=settings.allow_aggregator_autopublish,
+        relevance_filter=relevance_filter,
     )
     try:
         report = pipeline.run(

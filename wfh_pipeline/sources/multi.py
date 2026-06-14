@@ -132,18 +132,29 @@ def build_sources(settings: "object", *, source_group: str = "all") -> "MultiLea
             sources.append(RemotiveLeadSource())
 
     # ------------------------------------------------------------------
-    # Optional job API
+    # Optional job API — multi-query, entry-level focused
     # ------------------------------------------------------------------
-    if include_direct or include_aggregator:
-        if settings.enable_job_api and settings.job_api_key:
+    if (include_direct or include_aggregator) and settings.enable_job_api:
+        if not settings.job_api_key:
+            logger.warning(
+                "ENABLE_JOB_API=true but JOB_API_KEY is not set — skipping job API source"
+            )
+        else:
             import os
-            query = os.environ.get("JOB_API_QUERY", "remote software engineer")
-            max_results = int(os.environ.get("JOB_API_MAX_RESULTS", "20"))
+            # queries comes from settings (parsed from JOB_API_QUERIES in .env)
+            queries = list(settings.job_api_queries) if settings.job_api_queries else [
+                "remote customer service no experience"
+            ]
+            max_per_query = int(os.environ.get("JOB_API_MAX_RESULTS", "20"))
+            logger.info(
+                "build_sources: wiring JobAPILeadSource with %d queries (max %d each)",
+                len(queries), max_per_query,
+            )
             sources.append(
                 JobAPILeadSource(
                     settings.job_api_key,
-                    query=query,
-                    max_results=max_results,
+                    queries=queries,
+                    max_results_per_query=max_per_query,
                 )
             )
 

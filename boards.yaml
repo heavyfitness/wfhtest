@@ -1,41 +1,50 @@
 # boards.yaml — ATS board configuration for wfh_pipeline
 #
-# Each entry under `greenhouse` is a Greenhouse job-board token.
-# Find yours at: https://boards.greenhouse.io/<token>/jobs
+# Verified 2026-06-14. All tokens live-checked against the Greenhouse/Lever APIs.
 #
-# Each entry under `lever` is a Lever company slug.
-# Find yours at: https://jobs.lever.co/<slug>
+# HONEST NOTE ON BPO / ENTRY-LEVEL CS EMPLOYERS:
+# The biggest remote CS employers (Concentrix, TTEC, Teleperformance, Sitel,
+# Sutherland, Conduent, BroadPath, Alorica, TaskUs, LiveOps, Arise, Working
+# Solutions, Kelly, Staffmark, Adecco, Transcom, Foundever) all returned 404
+# on Greenhouse. They use iCIMS, Taleo, Workday, or proprietary portals and
+# are NOT reachable via Greenhouse. The Job API lane (JSearch/RapidAPI) is
+# the primary volume driver for entry-level CS/data-entry leads.
 #
-# All Greenhouse boards below were verified 2026-06-13 and return remote jobs.
-# Verification status: anthropic=35 remote, stripe=92, gitlab=137, twilio=153,
-# vercel=17, airtable=14, discord=9, datadog=50
-#
-# Boards that returned 404 or 0 remote jobs (do NOT add):
-#   openai, notion, figma, linearapp, retool, zapier, shopify, github,
-#   automattic, hashicorp, hubspot
+# The boards below are confirmed Greenhouse customers that include at least
+# some remote CS/support/associate roles alongside technical roles.
+# The RELEVANCE_INCLUDE_KEYWORDS filter in .env will keep only the right ones.
 
 greenhouse:
-  - anthropic       # 35 remote roles — AI safety / engineering
-  - stripe          # 92 remote roles — payments infrastructure
-  - gitlab          # 137 remote roles — fully-distributed company
-  - twilio          # 153 remote roles — communications platform
-  - vercel          # 17 remote roles — frontend/edge infrastructure
-  - airtable        # 14 remote roles — no-code platform
-  - discord         # 9 remote roles  — community platform
-  - datadog         # 50 remote roles — observability/monitoring
+  # Original tech boards (senior roles, retain for blog variety)
+  - anthropic       # 35 remote roles — AI/engineering; needs relevance filter
+  - stripe          # 92 remote roles — fintech; needs relevance filter
+  - gitlab          # 137 remote roles — some support/success roles
+  - twilio          # 153 remote roles — some CS/support roles
+  - vercel          # 17 remote roles — engineering-heavy
+  - airtable        # 14 remote roles — mixed
+  - discord         # 9 remote roles  — community/support roles
+  - datadog         # 50 remote roles — some CS/success
 
-# Lever boards — add slugs for companies on jobs.lever.co/<slug>
-# Note: Lever's v0 public API is deprecated for many companies.
-# The source will log a warning and skip any slug that returns 404.
+  # Added 2026-06-14: verified CS/support-bearing boards
+  - samsara         # 260 remote — has ADR, CSM, support ops roles
+  - affirm          # 160 remote — Customer Operations Associate I (entry-level)
+  - typeform        # 18 remote — mixed, social/coordinator roles
+  - surveymonkey    # 5 remote — mixed
+  - justworks       # 14 remote — CS/success roles
+
+# Lever boards — add slugs from jobs.lever.co/<slug>
+# Lever v0 public API is largely deprecated; add tokens only if verified live.
 lever: []
 
-# RSS / aggregator feeds (always enabled; set to false to disable individually)
+# RSS / aggregator feeds (always enabled; set false to disable individually)
+# These land in the aggregator lane -> draft-only, honest "view on board" label
 rss:
   remoteok: true
   weworkremotely: true
   remotive: true
 
-# Optional structured job API (disabled by default — add key to .env to enable)
-# Set ENABLE_JOB_API=true and JOB_API_KEY=<your-key> in .env to activate.
+# Optional structured job API (JSearch / RapidAPI)
+# Set ENABLE_JOB_API=true and JOB_API_KEY=<key> in .env to activate.
+# See README for how to get a key and which search queries to use.
 job_api:
   enabled: false

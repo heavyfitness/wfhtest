@@ -1,4 +1,4 @@
-"""Orchestrator: fetch leads -> generate -> QC -> schema -> publish -> record."""
+"""Orchestrator: fetch leads -> relevance filter -> generate -> QC -> schema -> publish -> record."""
 from __future__ import annotations
 
 import logging
@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from .generation.generator import ContentGenerator
 from .models import GeneratedPost, Lead
 from .qc import validate_post
+from .relevance import RelevanceFilter
 from .schema import append_jobposting_schema
 from .sources.base import LeadSource
 from .state import PostedStore
@@ -85,6 +86,11 @@ class Pipeline:
 
     ``wordpress`` may be None for dry runs -- the pipeline refuses to do a real
     run without it.
+
+    ``relevance_filter`` is an optional :class:`~wfh_pipeline.relevance.RelevanceFilter`
+    applied after lane filtering to skip roles outside the target audience (e.g.
+    senior engineering titles when targeting entry-level CS/data-entry candidates).
+    Pass ``RelevanceFilter.from_env()`` to activate it from environment variables.
     """
 
     def __init__(
@@ -97,6 +103,7 @@ class Pipeline:
         timezone: str = "America/New_York",
         schedule_times: Sequence[str] = ("08:00", "12:00", "16:00"),
         allow_aggregator_autopublish: bool = False,
+        relevance_filter: RelevanceFilter | None = None,
     ) -> None:
         self._source = source
         self._generator = generator
@@ -105,6 +112,7 @@ class Pipeline:
         self._timezone = timezone
         self._schedule_times = tuple(schedule_times)
         self._allow_aggregator_autopublish = allow_aggregator_autopublish
+        self._relevance_filter = relevance_filter
 
     def run(
         self,
@@ -154,6 +162,18 @@ class Pipeline:
             if skipped:
                 logger.info(
                     "Lane filter %r: skipped %d lead(s) (wrong lane)", lane, skipped
+                )
+
+        # Relevance filter: skip roles outside the target audience.
+        # Applied after lane filter so we log accurately (lane rejects aren't counted).
+        if self._relevance_filter is not None and fresh:
+            before = len(fresh)
+            fresh = self._relevance_filter.filter_leads(fresh)
+            skipped = before - len(fresh)
+            if skipped:
+                logger.info(
+                    "Relevance filter: skipped %d lead(s) (off-target title/description)",
+                    skipped,
                 )
 
         if limit is not None:

@@ -19,6 +19,15 @@ VALID_LLM_BACKENDS = ("anthropic", "ollama")
 
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
+# Default entry-level / CS queries used when JOB_API_QUERIES is not set.
+_DEFAULT_JOB_API_QUERIES = (
+    "remote customer service no experience",
+    "remote data entry no experience",
+    "remote chat support entry level",
+    "virtual assistant remote",
+    "remote customer support associate",
+)
+
 
 class ConfigError(RuntimeError):
     """Raised when required configuration is missing or malformed."""
@@ -58,6 +67,13 @@ def _parse_domain_list(raw: str) -> tuple[str, ...]:
     if not raw:
         return ()
     return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _parse_query_list(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated list of job API search queries from an env var."""
+    if not raw.strip():
+        return ()
+    return tuple(q.strip() for q in raw.split(",") if q.strip())
 
 
 def load_boards_yaml(boards_path: str | Path | None = None) -> dict[str, Any]:
@@ -177,6 +193,9 @@ class Settings:
     # Optional job API (off by default)
     enable_job_api: bool
     job_api_key: str
+    # Entry-level search queries for the job API.
+    # Parsed from JOB_API_QUERIES (comma-separated) or falls back to defaults.
+    job_api_queries: tuple[str, ...]
     # Path to boards.yaml (auto-discovered when empty)
     boards_yaml_path: str
 
@@ -231,6 +250,11 @@ class Settings:
             job_api_cfg.get("enabled", False)
         )
 
+        # Entry-level search queries — comma-separated list in JOB_API_QUERIES,
+        # or use the built-in defaults tuned for WFH Connect's audience.
+        raw_queries = _env("JOB_API_QUERIES")
+        job_api_queries = _parse_query_list(raw_queries) if raw_queries else _DEFAULT_JOB_API_QUERIES
+
         return cls(
             wp_url=_env("WP_URL"),
             wp_username=_env("WP_USERNAME"),
@@ -263,6 +287,7 @@ class Settings:
             rss_remotive=rss_remotive,
             enable_job_api=enable_job_api,
             job_api_key=_env("JOB_API_KEY"),
+            job_api_queries=job_api_queries,
             boards_yaml_path=str(boards_path or _env("BOARDS_YAML_PATH")),
         )
 

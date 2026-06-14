@@ -283,7 +283,7 @@ The pipeline pulls from multiple lead sources in a single run, deduplicated via 
 
 - **ATS sources** (`greenhouse.py`, `lever.py`) — `source_trust="direct"`, enter the direct lane. Apply URLs go straight to Greenhouse/Lever job boards.
 - **RSS sources** (`rss.py`) — `source_trust="aggregator"`, enter the aggregator lane. Posts as draft by default, receive "View on {Board}" honest labeling.
-- **Job API** (`job_api.py`) — `source_trust="unknown"`, URLs classified per-lead by the existing classifier.
+- **Job API** (`job_api.py`) — `source_trust="unknown"`, URLs classified per-lead by the existing classifier. Runs multiple search queries in one call (configured via `JOB_API_QUERIES` in `.env`), deduplicates results by job ID.
 
 ### Configuration: boards.yaml
 
@@ -305,23 +305,36 @@ rss:
 ### Daily run commands
 
 ```bash
-# Standard morning run — ATS boards only, direct lane, draft status
-python -m wfh_pipeline run --source-group direct --lane direct --status draft --limit 5
+# Recommended daily run — ATS boards, direct lane, relevance filter on, draft
+python -m wfh_pipeline run \
+  --source-group direct \
+  --lane direct \
+  --status draft \
+  --limit 5
 
-# With scheduling (spread across 08:00, 12:00, 16:00)
-python -m wfh_pipeline run --source-group direct --lane direct --status draft --schedule
+# With scheduling (spread across 08:00, 12:00, 16:00 in TIMEZONE)
+python -m wfh_pipeline run \
+  --source-group direct \
+  --lane direct \
+  --status draft \
+  --schedule
 
-# Dry-run preview first (no WordPress writes)
+# Dry-run preview — see what would be generated, no WordPress writes
 python -m wfh_pipeline run --source-group direct --lane direct --dry-run --limit 5
 
-# Weekly aggregator review — RSS + resolve source links
+# Weekly aggregator review — RSS feeds, resolve source links, draft only
 python -m wfh_pipeline run \
   --source-group aggregator \
   --lane aggregator \
   --status draft \
   --resolve-source-links \
   --limit 10
+
+# All sources, pass everything through (debug / triage)
+python -m wfh_pipeline run --source-group all --lane all --dry-run --no-relevance-filter
 ```
+
+The **relevance filter is on by default** — it skips senior/engineering titles and requires at least one CS/entry-level keyword before spending an LLM call on generation. Add `--no-relevance-filter` to disable for a single run.
 
 ### Adding a new Greenhouse board token
 
@@ -329,6 +342,45 @@ python -m wfh_pipeline run \
 2. Verify it returns remote jobs: `curl "https://boards-api.greenhouse.io/v1/boards/<token>/jobs?content=false" | python3 -m json.tool | grep -i remote`
 3. Add the token to `boards.yaml` under `greenhouse:`
 4. Run a dry-run to confirm leads appear: `python -m wfh_pipeline run --source-group direct --lane direct --dry-run`
+
+### Relevance / quality filter
+
+The filter (in `wfh_pipeline/relevance.py`) runs **after** lane routing and **before** LLM generation. It skips titles that:
+- match any `RELEVANCE_EXCLUDE_TITLE` keyword (default: senior, staff, principal, engineer, manager, director, vp, etc.)
+- contain **no** `RELEVANCE_INCLUDE_KEYWORDS` match (default: customer service, data entry, chat support, virtual assistant, entry level, etc.)
+
+Configure in `.env`:
+
+```dotenv
+# Leave blank to use built-in defaults (recommended)
+RELEVANCE_INCLUDE_KEYWORDS=
+RELEVANCE_EXCLUDE_TITLE=
+
+# Override to keep only billing/collections roles, for example:
+# RELEVANCE_INCLUDE_KEYWORDS=billing,collections,accounts receivable
+# RELEVANCE_EXCLUDE_TITLE=senior,director,manager
+
+# Disable include-keyword requirement (only exclude list applies):
+RELEVANCE_PERMISSIVE=false
+```
+
+### Job API (JSearch / RapidAPI)
+
+1. Sign up at [rapidapi.com](https://rapidapi.com) → subscribe to **JSearch** (free tier).
+2. Set in `.env`:
+
+```dotenv
+ENABLE_JOB_API=true
+JOB_API_KEY=your-rapidapi-key
+
+# Multi-query: each query runs independently; results combined + deduped by job ID
+JOB_API_QUERIES=remote customer service no experience,remote data entry no experience,remote chat support entry level,virtual assistant remote,remote customer support associate
+
+JOB_API_MAX_RESULTS=20   # per query
+```
+
+3. The relevance filter runs on Job API results the same as ATS/RSS leads.
+4. BPO employers (Concentrix, TTEC, etc.) are **not** on Greenhouse — Job API is the primary source for entry-level CS leads from these employers.
 
 ### Lever board tokens
 
