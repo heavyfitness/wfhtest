@@ -5,10 +5,6 @@ from urllib.parse import urlparse
 
 from ..models import Lead
 
-# ---------------------------------------------------------------------------
-# Known aggregator board display names (keyed by domain suffix)
-# ---------------------------------------------------------------------------
-
 _BOARD_NAMES: dict[str, str] = {
     "remoteok.com": "RemoteOK",
     "weworkremotely.com": "We Work Remotely",
@@ -28,12 +24,10 @@ _BOARD_NAMES: dict[str, str] = {
 
 
 def _source_display_name(lead: Lead) -> str:
-    """Human-readable name of the source platform for aggregator link text."""
     netloc = urlparse(lead.apply_url).netloc.lower().removeprefix("www.")
     for domain, name in _BOARD_NAMES.items():
         if netloc == domain or netloc.endswith("." + domain):
             return name
-    # Fallback: capitalise the second-level domain label
     label = netloc.split(".")[-2] if "." in netloc else netloc
     return label.title() or "the job board"
 
@@ -44,55 +38,40 @@ SYSTEM_PROMPT = (
     "VOICE\n"
     "- Trustworthy, plain-spoken, zero hype. You are a helpful friend who screens "
     "job leads, not a marketer.\n"
-    "- NEVER promise or imply guaranteed income, easy money, or fast riches. Avoid "
-    'phrases like "amazing opportunity", "unlimited earnings", "life-changing".\n'
-    "- Be candid about unknowns: if pay or schedule isn't published, say so and "
-    "tell readers to confirm with the employer.\n"
+    "- NEVER promise or imply guaranteed income, easy money, or fast riches.\n"
+    "- Be candid about unknowns: if pay or schedule isn't published, say so.\n"
     "- Readers worry about scams. Reinforce practical trust signals: apply only via "
     "the official link, never pay to apply, guard personal data.\n"
     "- Only state facts found in the job lead. Do not invent duties, benefits, or pay.\n\n"
     "HTML RULES (for body_html)\n"
-    "- Clean semantic HTML only: <h2>/<h3> headings, short <p> paragraphs of 2-4 "
-    "sentences, <ul><li> lists, <strong>/<em> sparingly. No <h1>, no inline styles, "
-    "no <script> tags, no markdown syntax.\n"
-    "- Include a bulleted requirements list under its own <h2> heading.\n"
-    "- Include exactly one apply link, inside a 'How to apply' section, using the "
-    "exact anchor tag provided in LINK FRAMING below. Do not alter its text or href.\n"
-    "- Do NOT write affiliate links, disclosures, disclaimers, or JSON-LD. Those "
-    "are appended automatically after you.\n\n"
+    "- Clean semantic HTML only: <h2>/<h3>, short <p> paragraphs, <ul><li> lists, "
+    "<strong>/<em> sparingly. No <h1>, no inline styles, no <script>, no markdown.\n"
+    "- Include a bulleted requirements list under its own <h2> heading. "
+    "If requirements or qualifications are present in the description, list them. "
+    "Only write 'no requirements were listed' when the DESCRIPTION field is also "
+    "empty — never omit requirements that are clearly stated in the description.\n"
+    "- Include exactly one apply link in the 'How to apply' section using the "
+    "exact anchor tag from LINK FRAMING. Do not alter its text or href.\n"
+    "- Do NOT write affiliate links, disclaimers, or JSON-LD.\n\n"
     "SEO\n"
-    "- Target ONE realistic long-tail keyword a job seeker would actually type "
-    '(e.g. "remote chat support jobs no phone"), not a head term.\n'
-    "- seo_title: under 60 characters, contains the keyword or a close variant, no clickbait.\n"
-    "- meta_description: under 155 characters, plain and factual, contains the keyword.\n"
-    "- slug: lowercase-hyphenated, derived from the keyword/title.\n"
-    "- Use the keyword naturally in the first paragraph and one heading. Never stuff.\n\n"
+    "- Target ONE realistic long-tail keyword a job seeker would type.\n"
+    "- seo_title: under 60 chars, contains keyword, no clickbait.\n"
+    "- meta_description: under 155 chars, plain and factual.\n"
+    "- slug: lowercase-hyphenated.\n\n"
     "OUTPUT\n"
-    "Return ONLY a valid JSON object -- no markdown fences, no commentary -- with "
-    'exactly these keys: "seo_title", "slug", "meta_description", "focus_keyword", '
-    '"body_html", "excerpt". '
-    '"excerpt" is 1-2 plain-text sentences for archive pages. Escape quotes and '
-    "newlines so every value is valid JSON."
+    "Return ONLY a valid JSON object with exactly these keys: "
+    '"seo_title", "slug", "meta_description", "focus_keyword", "body_html", "excerpt". '
+    "No markdown fences. No commentary."
 )
 
 
 def apply_anchor_html(lead: Lead) -> str:
-    """The exact apply-link markup the model is instructed to embed verbatim.
-
-    The anchor text is chosen deterministically based on lead.is_direct:
-
-    * is_direct=True  -> "Apply directly on their site"
-    * is_direct=False -> "View this listing on <Source Board>"
-
-    This ensures the post never claims a direct employer link when the URL
-    actually points to a third-party aggregator.
-    """
+    """Deterministic apply-link markup based on lead.is_direct."""
     if lead.is_direct:
         link_text = "Apply directly on their site"
     else:
         board = _source_display_name(lead)
         link_text = f"View this listing on {board}"
-
     return (
         '<p><a class="wfh-apply-button" href="'
         + lead.apply_url
@@ -102,23 +81,40 @@ def apply_anchor_html(lead: Lead) -> str:
     )
 
 
+def _format_requirements(lead: Lead) -> str:
+    """Build the requirements block for the prompt.
+
+    Priority:
+    1. Use lead.requirements list if populated (pre-parsed bullet items).
+    2. If list is empty but description is non-empty, instruct the LLM to
+       extract requirements from the description — never falsely claim none exist.
+    3. Only claim "none listed" when BOTH requirements and description are empty.
+    """
+    if lead.requirements:
+        return "\n".join(f"- {item}" for item in lead.requirements)
+    if lead.description.strip():
+        return (
+            "- (The requirements are embedded in the description below. "
+            "Extract and list them as bullet points — do NOT write "
+            "'no requirements were listed'.)"
+        )
+    return "- (none listed in this posting — state that honestly in the post)"
+
+
 def build_user_prompt(lead: Lead) -> str:
-    requirements = "\n".join(f"- {item}" for item in lead.requirements) or "- (none listed)"
-    pay = lead.pay or "Not published -- tell readers to confirm pay before investing time"
+    requirements = _format_requirements(lead)
+    pay = lead.pay or "Not published — tell readers to confirm pay before investing time"
     anchor = apply_anchor_html(lead)
 
     if lead.is_direct:
         link_framing_note = (
-            "LINK TYPE: Direct employer link -- readers can apply without leaving this "
-            "employer's own site.  Use the anchor below as-is and write surrounding "
-            'copy that says "apply directly" or similar.'
+            "LINK TYPE: Direct employer link. Write copy that says 'apply directly' or similar."
         )
     else:
         board = _source_display_name(lead)
         link_framing_note = (
-            f"LINK TYPE: Aggregator listing on {board} -- this link goes to a job board, "
-            "NOT the employer's own site.  Use the anchor below as-is and write surrounding "
-            f'copy that says "view the listing on {board}" -- do NOT say "apply directly".'
+            f"LINK TYPE: Aggregator listing on {board}. "
+            f"Write copy that says 'view the listing on {board}' — do NOT say 'apply directly'."
         )
 
     return (
@@ -131,18 +127,18 @@ def build_user_prompt(lead: Lead) -> str:
         f"Category: {lead.category}\n"
         f'Fully remote: {"yes" if lead.remote else "see description"}\n'
         f"Date found: {lead.date_found.isoformat()}\n"
-        f"Apply URL: {lead.apply_url}\n"
         f"Requirements:\n{requirements}\n"
-        f"Description:\n{lead.description or '(no description provided -- keep the post short and factual)'}\n\n"
+        f"Description:\n{lead.description or '(no description provided — keep the post short and factual)'}\n\n"
         f"LINK FRAMING\n{link_framing_note}\n"
-        "Use this exact anchor in the 'How to apply' section -- copy it character-for-character:\n"
+        "Use this exact anchor in the 'How to apply' section:\n"
         f"{anchor}\n\n"
         "STRUCTURE\n"
-        "- Open with 2-3 sentences naming the role, the company, and the long-tail keyword (no heading first).\n"
-        "- <h2> about the role / what you'll actually do (from the description only).\n"
-        "- <h2> requirements, rendered as a <ul> list.\n"
-        "- <h2> pay and schedule -- facts from the lead only; clearly flag anything unstated.\n"
-        "- <h2> how to apply -- 2-3 short steps, then the exact anchor from LINK FRAMING on its own line.\n"
-        "- Close with one short, practical scam-awareness tip relevant to this kind of role.\n\n"
-        "Remember: return ONLY the JSON object described in your instructions."
+        "- Open with 2-3 sentences naming the role, company, and long-tail keyword.\n"
+        "- <h2> about the role / what you'll do (from description only).\n"
+        "- <h2> Requirements — list ALL requirements found in the description as <ul><li> items. "
+        "Only omit this section if no requirements appear anywhere in the description.\n"
+        "- <h2> Pay and schedule — facts only; flag anything unstated.\n"
+        "- <h2> How to apply — 2-3 steps, then the exact anchor on its own line.\n"
+        "- Close with one practical scam-awareness tip.\n\n"
+        "Return ONLY the JSON object."
     )

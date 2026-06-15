@@ -180,29 +180,29 @@ class TestLoadRelevanceConfig:
         monkeypatch.delenv("RELEVANCE_INCLUDE_KEYWORDS", raising=False)
         monkeypatch.delenv("RELEVANCE_EXCLUDE_TITLE", raising=False)
         monkeypatch.delenv("RELEVANCE_PERMISSIVE", raising=False)
-        include, exclude, permissive = load_relevance_config()
+        include, exclude, permissive, _reject_yoe = load_relevance_config()
         assert "customer service" in include
         assert "senior" in exclude
         assert permissive is False
 
     def test_custom_env_include(self, monkeypatch):
         monkeypatch.setenv("RELEVANCE_INCLUDE_KEYWORDS", "billing,collections")
-        include, _, _ = load_relevance_config()
+        include, _, _, _ = load_relevance_config()
         assert include == ("billing", "collections")
 
     def test_custom_env_exclude(self, monkeypatch):
         monkeypatch.setenv("RELEVANCE_EXCLUDE_TITLE", "executive,vp")
-        _, exclude, _ = load_relevance_config()
+        _, exclude, _, _ = load_relevance_config()
         assert exclude == ("executive", "vp")
 
     def test_permissive_true(self, monkeypatch):
         monkeypatch.setenv("RELEVANCE_PERMISSIVE", "true")
-        _, _, permissive = load_relevance_config()
+        _, _, permissive, _ = load_relevance_config()
         assert permissive is True
 
     def test_empty_include_means_pass_all(self, monkeypatch):
         monkeypatch.setenv("RELEVANCE_INCLUDE_KEYWORDS", "")
-        include, _, _ = load_relevance_config()
+        include, _, _, _ = load_relevance_config()
         # Empty string → uses defaults (not empty tuple)
         assert len(include) > 0
 

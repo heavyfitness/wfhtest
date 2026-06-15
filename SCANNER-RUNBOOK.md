@@ -304,25 +304,30 @@ rss:
 
 ### Daily run commands
 
+The **recommended daily command** uses `--source-group all` so both the ATS direct lane (Greenhouse boards) and the Job API entry-level lane run together:
+
 ```bash
-# Recommended daily run — ATS boards, direct lane, relevance filter on, draft
+# ── Recommended daily run ────────────────────────────────────────────────────
+# Sources: all Greenhouse boards + Job API entry-level queries
+# Lane: direct only (ATS links) — aggregator leads skip to draft automatically
+# Relevance filter: ON — skips senior/high-experience roles before LLM call
 python -m wfh_pipeline run \
-  --source-group direct \
+  --source-group all \
   --lane direct \
   --status draft \
   --limit 5
 
-# With scheduling (spread across 08:00, 12:00, 16:00 in TIMEZONE)
+# With scheduling (spread across 08:00, 12:00, 16:00)
 python -m wfh_pipeline run \
-  --source-group direct \
+  --source-group all \
   --lane direct \
   --status draft \
   --schedule
 
-# Dry-run preview — see what would be generated, no WordPress writes
-python -m wfh_pipeline run --source-group direct --lane direct --dry-run --limit 5
+# ── Dry-run preview (no WordPress writes) ───────────────────────────────────
+python -m wfh_pipeline run --source-group all --lane direct --dry-run --limit 5 -v
 
-# Weekly aggregator review — RSS feeds, resolve source links, draft only
+# ── Weekly aggregator review — RSS feeds, draft only ────────────────────────
 python -m wfh_pipeline run \
   --source-group aggregator \
   --lane aggregator \
@@ -330,11 +335,16 @@ python -m wfh_pipeline run \
   --resolve-source-links \
   --limit 10
 
-# All sources, pass everything through (debug / triage)
+# ── Debug / triage — bypass all filters ─────────────────────────────────────
 python -m wfh_pipeline run --source-group all --lane all --dry-run --no-relevance-filter
 ```
 
-The **relevance filter is on by default** — it skips senior/engineering titles and requires at least one CS/entry-level keyword before spending an LLM call on generation. Add `--no-relevance-filter` to disable for a single run.
+**Relevance filter** is on by default. It:
+1. Rejects titles matching exclude keywords (senior, staff, principal, engineer, manager, …)
+2. Rejects descriptions stating 3+ years of experience required
+3. Requires at least one include keyword (customer service, call center, data entry, …)
+
+Add `--no-relevance-filter` to bypass for a single run. Tune keywords in `.env` with `RELEVANCE_INCLUDE_KEYWORDS`, `RELEVANCE_EXCLUDE_TITLE`, `RELEVANCE_REJECT_EXPERIENCE_YEARS`.
 
 ### Adding a new Greenhouse board token
 

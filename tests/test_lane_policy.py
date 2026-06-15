@@ -142,7 +142,7 @@ def test_aggregator_lead_forced_to_draft_when_autopublish_off(
     processed = [r for r in report.results if r.action in ("dry_run", "skipped_qc")]
     assert len(processed) == 1
     # Autopublish guard log should appear
-    assert "needs manual direct-link review" in caplog.text
+    assert "AGGREGATOR: forcing draft" in caplog.text
 
 
 def test_aggregator_lead_allowed_when_autopublish_on(

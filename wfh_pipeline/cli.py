@@ -219,6 +219,7 @@ def run(
         schedule_times=settings.schedule_times,
         allow_aggregator_autopublish=settings.allow_aggregator_autopublish,
         relevance_filter=relevance_filter,
+        non_phone_tag=settings.non_phone_tag,
     )
     try:
         report = pipeline.run(
@@ -272,8 +273,4 @@ def _print_preview(result: LeadResult) -> None:
 
 
 def main() -> None:
-    app()
-
-
-if __name__ == "__main__":
-    main()
+    app(

@@ -103,7 +103,7 @@ def test_user_prompt_aggregator_forbids_direct_apply_phrase(make_lead) -> None:
     lead = make_lead(apply_url="https://weworkremotely.com/remote-jobs/view/99")
     prompt = build_user_prompt(lead)
     assert lead.is_direct is False
-    assert 'do NOT say "apply directly"' in prompt
+    assert "do NOT say 'apply directly'" in prompt
 
 
 def test_user_prompt_anchor_matches_apply_anchor_html(make_lead) -> None:

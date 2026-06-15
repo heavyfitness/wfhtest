@@ -1,27 +1,63 @@
-"""ATS (Applicant Tracking System) lead sources — direct-trust lane.
-
-``ATSLeadSource`` is an abstract base for any feed whose links go straight to
-an employer's own ATS.  All subclasses inherit ``trust = "direct"`` so every
-lead they emit enters the direct publishing lane automatically.
-
-``GreenhouseLeadSource`` is a concrete scaffold for the Greenhouse Job Board
-API (https://developers.greenhouse.io/job-board.html).  It is intentionally
-*not* activated in the pipeline until Ben explicitly adds an employer's board
-token to the config — see SCANNER-RUNBOOK.md § ATS Sources.
-"""
+"""ATS (Applicant Tracking System) lead sources — direct-trust lane."""
 from __future__ import annotations
 
+import html as html_mod
 import logging
+import re
 from abc import abstractmethod
 from typing import Any
 
 import httpx
 
 from ..models import Lead
-from ..utils import slugify
 from .base import LeadSource
 
 logger = logging.getLogger(__name__)
+
+# Max chars of clean description text passed to the LLM prompt.
+_DESC_MAX = 3000
+
+# ---------------------------------------------------------------------------
+# HTML parsing helpers — no external deps required
+# ---------------------------------------------------------------------------
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s{2,}")
+
+
+def _strip_html(raw: str) -> str:
+    """Decode HTML entities and strip all tags, collapsing extra whitespace."""
+    decoded = html_mod.unescape(raw)
+    plain = _TAG_RE.sub(" ", decoded)
+    return _WHITESPACE_RE.sub(" ", plain).strip()
+
+
+def _extract_li_items(raw: str) -> list[str]:
+    """Pull text from every <li>…</li> block in an HTML string.
+
+    Returns a list of clean strings, deduped and capped at 30 items.
+    """
+    items: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"<li[^>]*>(.*?)</li>", raw, re.DOTALL | re.IGNORECASE):
+        text = _strip_html(match.group(1)).strip()
+        if text and text not in seen:
+            seen.add(text)
+            items.append(text)
+    return items[:30]
+
+
+def _parse_greenhouse_content(raw_html: str) -> tuple[str, list[str]]:
+    """Parse a Greenhouse posting's ``content`` HTML field.
+
+    Returns ``(clean_description, requirements_list)`` where
+    ``clean_description`` is the full text with tags/entities stripped and
+    ``requirements_list`` contains all ``<li>`` items found in the HTML
+    (typically qualifications, responsibilities, and nice-to-haves).
+    """
+    requirements = _extract_li_items(raw_html)
+    clean_text = _strip_html(raw_html)
+    return clean_text, requirements
 
 
 # ---------------------------------------------------------------------------
@@ -30,12 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 class ATSLeadSource(LeadSource):
-    """A :class:`LeadSource` whose links are always ATS-direct.
-
-    Subclasses must implement :meth:`fetch_new_leads`.  They inherit
-    ``trust = "direct"`` and should pass ``source_trust=self.trust`` when
-    constructing :class:`~wfh_pipeline.models.Lead` objects.
-    """
+    """A LeadSource whose links are always ATS-direct."""
 
     trust = "direct"
 
@@ -55,17 +86,11 @@ class GreenhouseLeadSource(ATSLeadSource):
     ----------
     board_token:
         The employer's Greenhouse board token (e.g. ``"anthropic"``).
-        Find it at https://boards.greenhouse.io/<board_token>/jobs
     require_remote:
-        When ``True`` (default), skip postings not tagged as remote.
+        Skip postings not tagged as remote (default: True).
     keyword_filters:
-        Optional list of case-insensitive strings; at least one must appear in
+        Optional case-insensitive strings; at least one must appear in
         the job title or content for the lead to be included.
-
-    Examples
-    --------
-    >>> source = GreenhouseLeadSource("anthropic")
-    >>> leads = source.fetch_new_leads()
     """
 
     name = "greenhouse"
@@ -84,10 +109,6 @@ class GreenhouseLeadSource(ATSLeadSource):
         self._require_remote = require_remote
         self._keyword_filters = [kw.lower() for kw in (keyword_filters or [])]
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
     def fetch_new_leads(self) -> list[Lead]:
         jobs = self._fetch_jobs()
         leads: list[Lead] = []
@@ -97,28 +118,21 @@ class GreenhouseLeadSource(ATSLeadSource):
                 leads.append(lead)
         logger.info(
             "Greenhouse[%s]: %d jobs fetched, %d converted to leads",
-            self._board_token,
-            len(jobs),
-            len(leads),
+            self._board_token, len(jobs), len(leads),
         )
         return leads
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _fetch_jobs(self) -> list[dict[str, Any]]:
         url = self._API_BASE.format(token=self._board_token)
-        params: dict[str, str] = {"content": "true"}
         try:
             with httpx.Client(timeout=15) as client:
-                resp = client.get(url, params=params)
+                # content=true fetches the full job description HTML
+                resp = client.get(url, params={"content": "true"})
                 resp.raise_for_status()
         except httpx.HTTPError as exc:
             logger.error("Greenhouse API error for board %r: %s", self._board_token, exc)
             return []
-        data = resp.json()
-        return data.get("jobs", [])
+        return resp.json().get("jobs", [])
 
     def _job_to_lead(self, job: dict[str, Any]) -> Lead | None:
         job_id = job.get("id")
@@ -132,14 +146,18 @@ class GreenhouseLeadSource(ATSLeadSource):
             if "remote" not in location:
                 return None
 
-        # Keyword filter (title or content)
+        raw_content: str = str(job.get("content", ""))
+
+        # Keyword filter (title + cleaned content)
         if self._keyword_filters:
-            content_blob = (title + " " + str(job.get("content", ""))).lower()
+            content_blob = (title + " " + _strip_html(raw_content)).lower()
             if not any(kw in content_blob for kw in self._keyword_filters):
                 return None
 
+        # Parse the HTML content: decode entities, strip tags, extract <li> items
+        clean_description, requirements = _parse_greenhouse_content(raw_content)
+
         apply_url = self._JOB_URL.format(token=self._board_token, job_id=job_id)
-        content: str = str(job.get("content", ""))
 
         try:
             return Lead(
@@ -149,8 +167,11 @@ class GreenhouseLeadSource(ATSLeadSource):
                 source=f"greenhouse:{self._board_token}",
                 source_trust=self.trust,
                 remote=True,
-                description=content[:2000],  # cap to avoid huge LLM prompts
-                verified=True,  # ATS feed = pre-verified
+                # Cleaned plain text — the LLM sees real prose, not HTML tags
+                description=clean_description[:_DESC_MAX],
+                # Extracted bullet items from the posting (qualifications etc.)
+                requirements=requirements,
+                verified=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping Greenhouse job %s (%s): %s", job_id, title, exc)

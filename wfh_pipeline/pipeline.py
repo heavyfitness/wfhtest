@@ -16,7 +16,7 @@ from .relevance import RelevanceFilter
 from .schema import append_jobposting_schema
 from .sources.base import LeadSource
 from .state import PostedStore
-from .utils import humanize_category
+from .utils import humanize_category, is_non_phone
 from .wordpress import WordPressClient, WordPressError
 
 logger = logging.getLogger(__name__)
@@ -28,14 +28,14 @@ Lane = Literal["direct", "aggregator", "all"]
 @dataclass
 class LeadResult:
     lead_id: str
-    label: str  # "Company -- Title"
+    label: str
     action: Action
     detail: str = ""
     wp_post_id: int | None = None
     wp_url: str = ""
     scheduled_for: datetime | None = None
     post: GeneratedPost | None = None
-    content_html: str = ""  # final body incl. JSON-LD -- exactly what goes to WP
+    content_html: str = ""
 
 
 @dataclass
@@ -59,12 +59,7 @@ def compute_schedule(
     times: Sequence[str],
     now: datetime | None = None,
 ) -> list[datetime]:
-    """Next ``count`` publish slots, spreading posts across ``times`` each day.
-
-    Slots earlier than now+5min are skipped, so a 9am run with times
-    08:00/12:00/16:00 schedules today 12:00, today 16:00, tomorrow 08:00, ...
-    ``now``, when given, must be timezone-aware.
-    """
+    """Next ``count`` publish slots, spreading posts across ``times`` each day."""
     tz = ZoneInfo(tz_name)
     current = now.astimezone(tz) if now is not None else datetime.now(tz)
     slot_times = sorted(dt_time(int(entry[:2]), int(entry[3:5])) for entry in times)
@@ -84,13 +79,13 @@ def compute_schedule(
 class Pipeline:
     """Wires a lead source, generator, dedup store, and WP client together.
 
-    ``wordpress`` may be None for dry runs -- the pipeline refuses to do a real
-    run without it.
-
-    ``relevance_filter`` is an optional :class:`~wfh_pipeline.relevance.RelevanceFilter`
-    applied after lane filtering to skip roles outside the target audience (e.g.
-    senior engineering titles when targeting entry-level CS/data-entry candidates).
-    Pass ``RelevanceFilter.from_env()`` to activate it from environment variables.
+    Parameters
+    ----------
+    relevance_filter:
+        Optional filter applied after lane filtering to skip off-target roles.
+    non_phone_tag:
+        WordPress tag name added to non-phone (chat/email/data-entry) roles.
+        Set to empty string to disable auto-tagging.
     """
 
     def __init__(
@@ -104,6 +99,7 @@ class Pipeline:
         schedule_times: Sequence[str] = ("08:00", "12:00", "16:00"),
         allow_aggregator_autopublish: bool = False,
         relevance_filter: RelevanceFilter | None = None,
+        non_phone_tag: str = "Non-Phone",
     ) -> None:
         self._source = source
         self._generator = generator
@@ -113,6 +109,7 @@ class Pipeline:
         self._schedule_times = tuple(schedule_times)
         self._allow_aggregator_autopublish = allow_aggregator_autopublish
         self._relevance_filter = relevance_filter
+        self._non_phone_tag = non_phone_tag
 
     def run(
         self,
@@ -126,7 +123,7 @@ class Pipeline:
     ) -> PipelineReport:
         report = PipelineReport()
         leads = self._source.fetch_new_leads()
-        eligible = [lead for lead in leads if lead.verified]  # belt and braces
+        eligible = [lead for lead in leads if lead.verified]
 
         fresh: list[Lead] = []
         for lead in eligible:
@@ -142,7 +139,6 @@ class Pipeline:
             else:
                 fresh.append(lead)
 
-        # Optional: try to extract real employer apply URLs from aggregator pages.
         if resolve_source_links:
             from .link_resolver import try_resolve_lead
             resolved: list[Lead] = []
@@ -150,44 +146,34 @@ class Pipeline:
                 resolved.append(try_resolve_lead(lead))
             fresh = resolved
 
-        # Lane filter: route leads to the correct publishing lane based on
-        # whether the apply URL resolves to a direct ATS domain.
+        # Lane filter
         if lane != "all":
             before = len(fresh)
             if lane == "direct":
                 fresh = [lead for lead in fresh if lead.is_direct]
-            else:  # lane == "aggregator"
+            else:
                 fresh = [lead for lead in fresh if not lead.is_direct]
             skipped = before - len(fresh)
             if skipped:
-                logger.info(
-                    "Lane filter %r: skipped %d lead(s) (wrong lane)", lane, skipped
-                )
+                logger.info("Lane filter %r: skipped %d lead(s)", lane, skipped)
 
-        # Relevance filter: skip roles outside the target audience.
-        # Applied after lane filter so we log accurately (lane rejects aren't counted).
+        # Relevance filter (after lane filter)
         if self._relevance_filter is not None and fresh:
             before = len(fresh)
             fresh = self._relevance_filter.filter_leads(fresh)
             skipped = before - len(fresh)
             if skipped:
-                logger.info(
-                    "Relevance filter: skipped %d lead(s) (off-target title/description)",
-                    skipped,
-                )
+                logger.info("Relevance filter: skipped %d lead(s)", skipped)
 
         if limit is not None:
             fresh = fresh[:limit]
 
-        if schedule and status != "future":
-            logger.info("--schedule given; forcing status=future")
         use_future = schedule or status == "future"
         effective_status = "future" if use_future else status
         slots = (
             iter(compute_schedule(len(fresh), tz_name=self._timezone,
                                   times=self._schedule_times))
-            if use_future
-            else None
+            if use_future else None
         )
 
         if not dry_run and fresh and self._wordpress is None:
@@ -196,25 +182,17 @@ class Pipeline:
         for lead in fresh:
             label = f"{lead.company} — {lead.title}"
 
-            # Aggregator autopublish guard -- downgrade to draft when the lead's
-            # apply URL is not direct and ALLOW_AGGREGATOR_AUTOPUBLISH is off.
             lead_status = effective_status
             if not lead.is_direct and not self._allow_aggregator_autopublish:
                 if lead_status != "draft":
-                    logger.info(
-                        "AGGREGATOR -- needs manual direct-link review before publishing"
-                        " (%s); forcing status=draft", label,
-                    )
+                    logger.info("AGGREGATOR: forcing draft for %s", label)
                     lead_status = "draft"
                 else:
-                    logger.info(
-                        "AGGREGATOR -- needs manual direct-link review before publishing"
-                        " (%s)", label,
-                    )
+                    logger.info("AGGREGATOR: manual review needed for %s", label)
 
             try:
                 post = self._generator.generate(lead)
-            except Exception as exc:  # any backend/parse failure: skip, don't crash the run
+            except Exception as exc:
                 logger.exception("Content generation failed for %s", label)
                 report.results.append(LeadResult(lead.id, label, "error", detail=str(exc)))
                 continue
@@ -277,8 +255,14 @@ class Pipeline:
                 self._wordpress.get_or_create_tag(lead.company),
                 self._wordpress.get_or_create_tag(humanize_category(lead.category)),
             ]
+            # Auto-tag non-phone (chat/email/data-entry) roles
+            if self._non_phone_tag and is_non_phone(lead.title, lead.description):
+                tags.append(self._wordpress.get_or_create_tag(self._non_phone_tag))
+                logger.info(
+                    "Non-phone role detected for %s — adding tag %r",
+                    lead.id, self._non_phone_tag,
+                )
         except WordPressError as exc:
-            # Terms are nice-to-have; never block a post on taxonomy trouble.
             logger.warning("Could not resolve terms for %s (publishing without): %s",
                            lead.id, exc)
 

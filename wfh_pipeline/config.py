@@ -21,11 +21,16 @@ _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 # Default entry-level / CS queries used when JOB_API_QUERIES is not set.
 _DEFAULT_JOB_API_QUERIES = (
+    # Non-phone entry-level
     "remote customer service no experience",
     "remote data entry no experience",
     "remote chat support entry level",
-    "virtual assistant remote",
-    "remote customer support associate",
+    "virtual assistant remote entry level",
+    "remote email support no experience",
+    # Phone / call-center entry-level
+    "remote call center no experience",
+    "remote customer service representative no experience",
+    "remote inbound customer service",
 )
 
 
@@ -196,6 +201,9 @@ class Settings:
     # Entry-level search queries for the job API.
     # Parsed from JOB_API_QUERIES (comma-separated) or falls back to defaults.
     job_api_queries: tuple[str, ...]
+    # WordPress tag name applied to non-phone roles (chat/email/data-entry).
+    # Set NON_PHONE_TAG= (empty) to disable auto-tagging.
+    non_phone_tag: str
     # Path to boards.yaml (auto-discovered when empty)
     boards_yaml_path: str
 
@@ -288,6 +296,7 @@ class Settings:
             enable_job_api=enable_job_api,
             job_api_key=_env("JOB_API_KEY"),
             job_api_queries=job_api_queries,
+            non_phone_tag=_env("NON_PHONE_TAG", "Non-Phone"),
             boards_yaml_path=str(boards_path or _env("BOARDS_YAML_PATH")),
         )
 
@@ -304,7 +313,4 @@ class Settings:
         if self.llm_backend == "anthropic":
             self._require(("ANTHROPIC_API_KEY", self.anthropic_api_key))
 
-    def _require(self, *pairs: tuple[str, str]) -> None:
-        missing = [name for name, value in pairs if not value]
-        if missing:
-            raise ConfigError(f"Required env vars not set: {', '.join(missing)}")
+  
