@@ -1,0 +1,138 @@
+//@version=5
+// ============================================================================
+//  OHLC Sessions — Bull / Bear
+// ----------------------------------------------------------------------------
+//  A LuxAlgo-style "Sessions" indicator that draws a box around each trading
+//  session (New York, London, Tokyo, Pre-Market, ...). Instead of a fixed
+//  color per session, every box is colored by whether that session was
+//  BULLISH or BEARISH:
+//
+//        session close >= session open  ->  GREEN  (bullish)
+//        session close <  session open  ->  RED    (bearish)
+//
+//  Each box is anchored to the session's real OHLC and timestamps
+//  (top = session high, bottom = session low, left = session open time,
+//  right = session close time). Because the coordinates are price/time based
+//  — not pixel or bar-index based — the boxes stay fixed to price and time
+//  when you change the timeframe or scroll/pan around the chart.
+// ============================================================================
+indicator("OHLC Sessions — Bull / Bear", "Sessions Bull/Bear", overlay = true,
+     max_boxes_count = 500, max_labels_count = 500)
+
+// ─────────────────────────────── General ───────────────────────────────────
+gGen        = "General"
+tz          = input.string("America/New_York", "Timezone",
+     tooltip = "IANA timezone name used to evaluate the session times below.\n" +
+               "Examples: America/New_York, Europe/London, Asia/Tokyo.\n" +
+               "You can also use a fixed offset like GMT-4 (note: a fixed " +
+               "offset does NOT auto-adjust for daylight saving time).",
+     group = gGen)
+maxSessions = input.int(10, "Max boxes kept per session", minval = 1, maxval = 200,
+     tooltip = "How many past occurrences of each session to keep drawn. " +
+               "Older boxes are removed to keep the chart clean.",
+     group = gGen)
+
+// ──────────────────────────── Bull / Bear look ─────────────────────────────
+gCol        = "Bull / Bear colors"
+colUp       = input.color(#089981, "Bullish  (close ≥ open)", group = gCol)
+colDn       = input.color(#f23645, "Bearish  (close < open)", group = gCol)
+bgTransp    = input.int(85, "Box fill transparency", minval = 0, maxval = 100,
+     tooltip = "0 = solid fill, 100 = fully transparent.", group = gCol)
+showBorder  = input.bool(true, "Border", inline = "bd", group = gCol)
+borderWidth = input.int(1, "width", minval = 1, maxval = 5, inline = "bd", group = gCol)
+showLabel   = input.bool(true, "Show session name", group = gCol)
+
+// ───────────────────────────────  Sessions  ────────────────────────────────
+// Defaults below are expressed in the "Timezone" chosen above.
+gS1  = "Session 1"
+s1on = input.bool(true,        "", inline = "s1", group = gS1)
+s1nm = input.string("New York","", inline = "s1", group = gS1)
+s1tm = input.session("0930-1700", "", inline = "s1", group = gS1)
+
+gS2  = "Session 2"
+s2on = input.bool(true,       "", inline = "s2", group = gS2)
+s2nm = input.string("London", "", inline = "s2", group = gS2)
+s2tm = input.session("0300-1200", "", inline = "s2", group = gS2)
+
+gS3  = "Session 3"
+s3on = input.bool(true,      "", inline = "s3", group = gS3)
+s3nm = input.string("Tokyo", "", inline = "s3", group = gS3)
+s3tm = input.session("1700-0500", "", inline = "s3", group = gS3)   // crosses midnight
+
+gS4  = "Session 4"
+s4on = input.bool(true,        "", inline = "s4", group = gS4)
+s4nm = input.string("Pre-Mkt", "", inline = "s4", group = gS4)
+s4tm = input.session("0830-0930", "", inline = "s4", group = gS4)
+
+gS5  = "Session 5 (spare)"
+s5on = input.bool(false,      "", inline = "s5", group = gS5)
+s5nm = input.string("Custom", "", inline = "s5", group = gS5)
+s5tm = input.session("0000-0100", "", inline = "s5", group = gS5)
+
+// ════════════════════════════════ Engine ═══════════════════════════════════
+// One Sess object tracks the live OHLC of a single session type and keeps a
+// rolling list of its drawn boxes / labels.
+type Sess
+    string       name
+    string       spec
+    bool         show
+    float        o  = na          // session open  (first bar's open)
+    float        h  = na          // session high  (running max)
+    float        l  = na          // session low   (running min)
+    int          t0 = na          // session open time (ms)
+    bool         on = false       // was price inside this session last bar?
+    array<box>   boxes
+    array<label> lbls
+
+// Process one session on the current bar.
+process(Sess s) =>
+    if s.show
+        inS = not na(time(timeframe.period, s.spec, tz))
+
+        // ---- session just started: open a new box anchored to OHLC/time ----
+        if inS and not s.on
+            s.o  := open
+            s.h  := high
+            s.l  := low
+            s.t0 := time
+            b = box.new(s.t0, s.h, time_close, s.l, xloc = xloc.bar_time,
+                 border_width = showBorder ? borderWidth : 0)
+            lb = label.new(s.t0, s.h, s.name, xloc = xloc.bar_time,
+                 style = label.style_label_down, textalign = text.align_left)
+            array.push(s.boxes, b)
+            array.push(s.lbls,  lb)
+            // trim history
+            if array.size(s.boxes) > maxSessions
+                box.delete(array.shift(s.boxes))
+                label.delete(array.shift(s.lbls))
+
+        // ---- inside the session: keep the box glued to the live OHLC -------
+        if inS
+            s.h := math.max(s.h, high)
+            s.l := math.min(s.l, low)
+            col = close >= s.o ? colUp : colDn          // bull vs bear
+            b   = array.last(s.boxes)
+            box.set_lefttop(b, s.t0, s.h)
+            box.set_rightbottom(b, time_close, s.l)
+            box.set_bgcolor(b, color.new(col, bgTransp))
+            box.set_border_color(b, showBorder ? col : color.new(col, 100))
+            lb = array.last(s.lbls)
+            label.set_xy(lb, s.t0, s.h)
+            label.set_color(lb, color.new(col, 100))    // transparent bubble
+            label.set_text(lb, showLabel ? s.name : "")
+            label.set_textcolor(lb, showLabel ? col : color.new(col, 100))
+
+        s.on := inS
+
+// One persistent object per session.
+var s1 = Sess.new(s1nm, s1tm, s1on, boxes = array.new<box>(), lbls = array.new<label>())
+var s2 = Sess.new(s2nm, s2tm, s2on, boxes = array.new<box>(), lbls = array.new<label>())
+var s3 = Sess.new(s3nm, s3tm, s3on, boxes = array.new<box>(), lbls = array.new<label>())
+var s4 = Sess.new(s4nm, s4tm, s4on, boxes = array.new<box>(), lbls = array.new<label>())
+var s5 = Sess.new(s5nm, s5tm, s5on, boxes = array.new<box>(), lbls = array.new<label>())
+
+process(s1)
+process(s2)
+process(s3)
+process(s4)
+process(s5)
